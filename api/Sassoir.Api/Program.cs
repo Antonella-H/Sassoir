@@ -93,10 +93,48 @@ app.MapPost("/api/auth/login", (LoginRequest request, AuthStore auth) =>
     return login is null ? Results.Unauthorized() : Results.Ok(login);
 });
 
+app.MapPost("/api/auth/refresh", (RefreshTokenRequest request, AuthStore auth) =>
+{
+    var login = auth.Refresh(request.RefreshToken);
+    return login is null ? Results.Unauthorized() : Results.Ok(login);
+});
+
 app.MapGet("/api/auth/me", (HttpRequest request, AuthStore auth) =>
 {
     var user = auth.GetCurrentUser(request);
     return user is null ? Results.Unauthorized() : Results.Ok(user);
+});
+
+app.MapPost("/api/auth/change-password", (ChangePasswordRequest password, HttpRequest request, AuthStore auth) =>
+{
+    var result = auth.ChangePassword(request, password.CurrentPassword, password.NewPassword);
+    return result switch
+    {
+        "unauthorized" => Results.Unauthorized(),
+        not null => Results.BadRequest(new { message = result }),
+        _ => Results.Ok(new { status = "updated" })
+    };
+});
+
+app.MapPost("/api/auth/forgot-password", (ForgotPasswordRequest password, AuthStore auth) =>
+{
+    var reset = auth.CreatePasswordReset(password.Email);
+    return Results.Ok(new
+    {
+        message = "If the email belongs to an admin account, a reset link can be sent.",
+        resetToken = reset
+    });
+});
+
+app.MapPost("/api/auth/reset-password", (ResetPasswordRequest password, AuthStore auth) =>
+{
+    var result = auth.ResetPassword(password.ResetToken, password.NewPassword);
+    return result switch
+    {
+        "unauthorized" => Results.Unauthorized(),
+        not null => Results.BadRequest(new { message = result }),
+        _ => Results.Ok(new { status = "updated" })
+    };
 });
 
 app.MapPost("/api/admin/uploads/event-image", async (HttpRequest request, AuthStore auth) =>
@@ -126,40 +164,25 @@ app.MapPost("/api/admin/uploads/event-image", async (HttpRequest request, AuthSt
 
 app.MapGet("/api/public/events/{slug}", (string slug, EventStore store) =>
 {
-    var eventDetails = store.GetPublishedEvent(slug);
-    return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails.ToPublicDto());
+    var eventDetails = store.GetPublishedPublicEvent(slug);
+    return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails);
 });
 
 app.MapGet("/api/public/events/{slug}/floor-plan", (string slug, EventStore store) =>
 {
-    var eventDetails = store.GetPublishedEvent(slug);
-    return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails.FloorPlan);
+    var floorPlan = store.GetPublishedFloorPlan(slug);
+    return floorPlan is null ? Results.NotFound() : Results.Ok(floorPlan);
 });
 
 app.MapPost("/api/public/events/{slug}/guests/search", (string slug, GuestSearchRequest request, EventStore store) =>
 {
-    var eventDetails = store.GetPublishedEvent(slug);
-    if (eventDetails is null) return Results.NotFound();
-
     var query = SearchNormalizer.Normalize(request.Query);
     if (query.Length < 2)
     {
         return Results.Ok(new GuestSearchResponse([]));
     }
 
-    var results = eventDetails.Guests
-        .Where(guest => guest.Status == GuestStatus.Active)
-        .Select(guest => new
-        {
-            Guest = guest,
-            Rank = SearchNormalizer.Rank(guest, query)
-        })
-        .Where(match => match.Rank < 99)
-        .OrderBy(match => match.Rank)
-        .ThenBy(match => match.Guest.DisplayName)
-        .Take(5)
-        .Select(match => match.Guest.ToSearchDto())
-        .ToArray();
+    var results = store.SearchPublicGuests(slug, query);
 
     store.TrackSearch(slug, query, results.Length > 0);
     return Results.Ok(new GuestSearchResponse(results));
@@ -167,22 +190,20 @@ app.MapPost("/api/public/events/{slug}/guests/search", (string slug, GuestSearch
 
 app.MapGet("/api/public/events/{slug}/guests/{publicToken}", (string slug, string publicToken, EventStore store) =>
 {
-    var eventDetails = store.GetPublishedEvent(slug);
-    var guest = eventDetails?.Guests.SingleOrDefault(item => item.PublicToken == publicToken);
+    var guest = store.GetPublicGuestSeat(slug, publicToken);
 
-    return guest is null || eventDetails is null
+    return guest is null
         ? Results.NotFound()
-        : Results.Ok(guest.ToSeatDto(eventDetails));
+        : Results.Ok(guest);
 });
 
 app.MapGet("/api/public/events/{slug}/guests/{publicToken}/floor-plan", (string slug, string publicToken, EventStore store) =>
 {
-    var eventDetails = store.GetPublishedEvent(slug);
-    var guest = eventDetails?.Guests.SingleOrDefault(item => item.PublicToken == publicToken);
+    var floorPlan = store.GetPublicGuestFloorPlan(slug, publicToken);
 
-    return guest is null || eventDetails is null
+    return floorPlan is null
         ? Results.NotFound()
-        : Results.Ok(new GuestFloorPlanDto(eventDetails.FloorPlan, $"table-{guest.TableCode}"));
+        : Results.Ok(floorPlan);
 });
 
 app.MapPost("/api/public/events/{slug}/guests/{publicToken}/messages", (string slug, string publicToken, GuestMessageRequest request, EventStore store) =>
@@ -336,6 +357,19 @@ app.MapPost("/api/admin/events/{eventId:guid}/guests/{guestId:guid}/assign-table
     };
 });
 
+app.MapPost("/api/admin/events/{eventId:guid}/guests/bulk-assign-table", (Guid eventId, BulkAssignGuestTableRequest assignment, HttpRequest request, AuthStore auth, EventStore store) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+
+    var result = store.BulkAssignGuestsToTable(eventId, assignment.GuestIds, assignment.TableId);
+    return result.Error switch
+    {
+        "not-found" => Results.NotFound(),
+        not null => Results.BadRequest(new { message = result.Error }),
+        _ => Results.Ok(result.Guests)
+    };
+});
+
 app.MapPost("/api/admin/events/{id:guid}/guests/import/preview", (Guid id, AdminGuestImportRequest import, HttpRequest request, AuthStore auth, EventStore store) =>
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
@@ -392,6 +426,35 @@ app.MapPost("/api/admin/events/{id:guid}/tables", (Guid id, AdminTableCreateRequ
         not null => Results.BadRequest(new { message = result.Error }),
         _ => Results.Created($"/api/admin/events/{id}/tables/{result.Table!.Id}", result.Table)
     };
+});
+
+app.MapPut("/api/admin/events/{eventId:guid}/tables/{tableId:guid}", (Guid eventId, Guid tableId, AdminTableUpsertRequest table, HttpRequest request, AuthStore auth, EventStore store) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    if (string.IsNullOrWhiteSpace(table.Name) || string.IsNullOrWhiteSpace(table.Number))
+    {
+        return Results.BadRequest(new { message = "Table name and number are required." });
+    }
+
+    var result = store.UpdateTable(eventId, tableId, table);
+    return result.Error switch
+    {
+        "not-found" => Results.NotFound(),
+        not null => Results.BadRequest(new { message = result.Error }),
+        _ => Results.Ok(result.Table)
+    };
+});
+
+app.MapDelete("/api/admin/events/{eventId:guid}/tables/{tableId:guid}", (Guid eventId, Guid tableId, HttpRequest request, AuthStore auth, EventStore store) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    return store.DeleteTable(eventId, tableId) ? Results.NoContent() : Results.NotFound();
+});
+
+app.MapGet("/api/admin/events/{id:guid}/messages", (Guid id, HttpRequest request, AuthStore auth, EventStore store) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    return store.GetEvent(id) is null ? Results.NotFound() : Results.Ok(store.GetGuestMessages(id));
 });
 
 app.MapGet("/api/admin/events/{id:guid}/floor-plan", (Guid id, HttpRequest request, AuthStore auth, EventStore store) =>
@@ -503,6 +566,7 @@ namespace Sassoir.Api.Data
                   code text not null,
                   shape text not null default 'Round',
                   capacity integer not null check (capacity > 0),
+                  notes text,
                   zone_name text,
                   floor_plan_x numeric(8, 6),
                   floor_plan_y numeric(8, 6),
@@ -644,6 +708,120 @@ namespace Sassoir.Api.Data
                 .SingleOrDefault(item => item.Slug.ToLower() == slug.ToLower() && item.Status == EventStatus.Published);
 
             return eventEntity is null ? null : ToEventDetails(eventEntity);
+        }
+
+        public PublicEventDto? GetPublishedPublicEvent(string slug)
+        {
+            var eventEntity = _db.Events
+                .AsNoTracking()
+                .Include(item => item.Theme)
+                .SingleOrDefault(item => item.Slug.ToLower() == slug.ToLower() && item.Status == EventStatus.Published);
+
+            return eventEntity is null ? null : ToPublicEventDto(eventEntity);
+        }
+
+        public FloorPlanDto? GetPublishedFloorPlan(string slug)
+        {
+            var eventEntity = _db.Events
+                .AsNoTracking()
+                .Include(item => item.Tables)
+                .Include(item => item.FloorPlans)
+                    .ThenInclude(item => item.Objects)
+                .SingleOrDefault(item => item.Slug.ToLower() == slug.ToLower() && item.Status == EventStatus.Published);
+
+            return eventEntity is null ? null : ToFloorPlanDto(eventEntity);
+        }
+
+        public GuestSearchResultDto[] SearchPublicGuests(string slug, string normalizedQuery)
+        {
+            var eventId = _db.Events
+                .AsNoTracking()
+                .Where(item => item.Slug.ToLower() == slug.ToLower() && item.Status == EventStatus.Published)
+                .Select(item => (Guid?)item.Id)
+                .SingleOrDefault();
+            if (eventId is null) return [];
+
+            var guests = _db.Guests
+                .AsNoTracking()
+                .Include(item => item.SearchAliases)
+                .Where(item => item.EventId == eventId && item.Status == GuestStatus.Active)
+                .Where(item =>
+                    item.NormalizedSearchName.StartsWith(normalizedQuery) ||
+                    item.NormalizedSearchName.Contains(normalizedQuery) ||
+                    item.SearchAliases.Any(alias =>
+                        alias.NormalizedAlias.StartsWith(normalizedQuery) ||
+                        alias.NormalizedAlias.Contains(normalizedQuery)))
+                .Take(50)
+                .AsEnumerable()
+                .Select(guest => new
+                {
+                    Guest = guest,
+                    Rank = SearchNormalizer.Rank(ToGuest(guest), normalizedQuery)
+                })
+                .Where(match => match.Rank < 99)
+                .OrderBy(match => match.Rank)
+                .ThenBy(match => match.Guest.DisplayName)
+                .Take(5)
+                .Select(match => new GuestSearchResultDto(match.Guest.PublicToken, match.Guest.DisplayName, match.Guest.GroupLabel))
+                .ToArray();
+
+            return guests;
+        }
+
+        public SeatResultDto? GetPublicGuestSeat(string slug, string publicToken)
+        {
+            var guest = _db.Guests
+                .AsNoTracking()
+                .Include(item => item.Table)
+                .Include(item => item.Event)
+                    .ThenInclude(item => item!.Theme)
+                .SingleOrDefault(item => item.Event != null && item.Event.Slug.ToLower() == slug.ToLower() && item.Event.Status == EventStatus.Published && item.PublicToken == publicToken);
+            if (guest?.Event is null) return null;
+
+            var companions = guest.TableId is null
+                ? []
+                : _db.Guests
+                    .AsNoTracking()
+                    .Where(item => item.EventId == guest.EventId && item.Status == GuestStatus.Active && item.Id != guest.Id && item.TableId == guest.TableId)
+                    .OrderBy(item => item.DisplayName)
+                    .Select(item => item.DisplayName)
+                    .ToArray();
+
+            return new SeatResultDto(
+                guest.DisplayName,
+                guest.GroupLabel,
+                guest.Table?.Code ?? string.Empty,
+                guest.Table?.Name ?? string.Empty,
+                guest.SeatNumber,
+                guest.Directions,
+                companions,
+                ToPublicEventDto(guest.Event));
+        }
+
+        public GuestFloorPlanDto? GetPublicGuestFloorPlan(string slug, string publicToken)
+        {
+            var guest = _db.Guests
+                .AsNoTracking()
+                .Include(item => item.Event)
+                .SingleOrDefault(item => item.Event != null && item.Event.Slug.ToLower() == slug.ToLower() && item.Event.Status == EventStatus.Published && item.PublicToken == publicToken);
+            if (guest?.Event is null) return null;
+
+            var eventEntity = _db.Events
+                .AsNoTracking()
+                .Include(item => item.Tables)
+                .Include(item => item.FloorPlans)
+                    .ThenInclude(item => item.Objects)
+                .Single(item => item.Id == guest.EventId);
+
+            var highlightedId = eventEntity.FloorPlans
+                .Where(item => item.IsActive)
+                .OrderByDescending(item => item.Version)
+                .SelectMany(item => item.Objects)
+                .Where(item => item.LinkedTableId == guest.TableId)
+                .Select(item => item.Id)
+                .FirstOrDefault() ?? $"table-{guest.TableId}";
+
+            return new GuestFloorPlanDto(ToFloorPlanDto(eventEntity), highlightedId);
         }
 
         public EventDetails? GetEvent(Guid id)
@@ -930,6 +1108,49 @@ namespace Sassoir.Api.Data
             return (ToAdminGuestDto(guest), null);
         }
 
+        public (IReadOnlyList<AdminGuestDto>? Guests, string? Error) BulkAssignGuestsToTable(Guid eventId, IReadOnlyList<Guid> guestIds, Guid? tableId)
+        {
+            if (!_db.Events.Any(item => item.Id == eventId)) return (null, "not-found");
+
+            var uniqueGuestIds = guestIds.Distinct().ToArray();
+            if (uniqueGuestIds.Length == 0) return ([], null);
+
+            EventTableEntity? table = null;
+            if (tableId is not null)
+            {
+                table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
+                if (table is null) return (null, "not-found");
+
+                var incomingAssigned = _db.Guests.Count(item =>
+                    item.EventId == eventId &&
+                    uniqueGuestIds.Contains(item.Id) &&
+                    item.TableId != tableId &&
+                    (item.Status == GuestStatus.Active || item.Status == GuestStatus.CheckedIn));
+                var currentlyAssigned = table.Guests.Count(item => !uniqueGuestIds.Contains(item.Id) && CountsTowardSeating(item.Status));
+                if (currentlyAssigned + incomingAssigned > table.Capacity)
+                {
+                    return (null, $"Table {table.Code} does not have enough open seats.");
+                }
+            }
+
+            var guests = _db.Guests
+                .Include(item => item.Table)
+                .Where(item => item.EventId == eventId && uniqueGuestIds.Contains(item.Id))
+                .ToArray();
+            if (guests.Length != uniqueGuestIds.Length) return (null, "not-found");
+            if (guests.Any(item => item.Status == GuestStatus.Archived)) return (null, "Archived guests cannot be assigned to tables.");
+
+            foreach (var guest in guests)
+            {
+                guest.TableId = tableId;
+                guest.UpdatedAt = DateTimeOffset.UtcNow;
+                guest.Table = table;
+            }
+
+            _db.SaveChanges();
+            return (guests.Select(item => ToAdminGuestDto(item)).ToArray(), null);
+        }
+
         public (AdminGuestImportPreviewDto? Preview, string? Error) PreviewGuestImport(Guid eventId, IReadOnlyList<AdminGuestImportRow> rows)
         {
             if (!_db.Events.Any(item => item.Id == eventId)) return (null, "not-found");
@@ -1022,7 +1243,8 @@ namespace Sassoir.Api.Data
                 Name = request.Name.Trim(),
                 Code = number,
                 Capacity = capacity,
-                Shape = "Round",
+                Shape = NormalizeTableShape(request.Shape),
+                Notes = request.Notes?.Trim(),
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
@@ -1035,18 +1257,77 @@ namespace Sassoir.Api.Data
                 FloorPlanId = floorPlan.Id,
                 LinkedTableId = table.Id,
                 ObjectType = "table",
-                Label = $"Table {number}",
+                Label = string.IsNullOrWhiteSpace(table.Name) ? $"Table {number}" : table.Name,
                 X = 0.12m + (_db.EventTables.Count(item => item.EventId == eventId) % 4) * 0.18m,
                 Y = 0.24m,
-                Width = 0.14m,
-                Height = 0.14m,
-                Shape = "round",
+                Width = ShapeDefaultWidth(table.Shape),
+                Height = ShapeDefaultHeight(table.Shape),
+                Shape = ToFloorShape(table.Shape),
                 ZIndex = 10,
                 IsVisible = true
             });
 
             _db.SaveChanges();
             return (ToAdminTableDto(table), null);
+        }
+
+        public (AdminTableDto? Table, string? Error) UpdateTable(Guid eventId, Guid tableId, AdminTableUpsertRequest request)
+        {
+            var table = _db.EventTables
+                .Include(item => item.Guests)
+                .SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
+            if (table is null) return (null, "not-found");
+
+            var number = request.Number.Trim();
+            if (_db.EventTables.Any(item => item.EventId == eventId && item.Id != tableId && item.Code == number))
+            {
+                return (null, "A table with this number already exists.");
+            }
+
+            var capacity = Math.Max(1, request.MaximumCapacity);
+            var assignedCount = table.Guests.Count(item => CountsTowardSeating(item.Status));
+            if (capacity < assignedCount)
+            {
+                return (null, $"Capacity cannot be below the assigned guest count ({assignedCount}).");
+            }
+
+            table.Name = request.Name.Trim();
+            table.Code = number;
+            table.Capacity = capacity;
+            table.Shape = NormalizeTableShape(request.Shape);
+            table.Notes = request.Notes?.Trim();
+            table.UpdatedAt = DateTimeOffset.UtcNow;
+
+            var floorObjects = _db.FloorPlanObjects.Where(item => item.LinkedTableId == tableId).ToArray();
+            foreach (var floorObject in floorObjects)
+            {
+                floorObject.Label = string.IsNullOrWhiteSpace(table.Name) ? $"Table {number}" : table.Name;
+                floorObject.Shape = ToFloorShape(table.Shape);
+                floorObject.Width = request.Width is null ? floorObject.Width : Math.Clamp(request.Width.Value, 0.04m, 1m);
+                floorObject.Height = request.Height is null ? floorObject.Height : Math.Clamp(request.Height.Value, 0.04m, 1m);
+            }
+
+            _db.SaveChanges();
+            return (ToAdminTableDto(table), null);
+        }
+
+        public bool DeleteTable(Guid eventId, Guid tableId)
+        {
+            var table = _db.EventTables.SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
+            if (table is null) return false;
+
+            var guests = _db.Guests.Where(item => item.EventId == eventId && item.TableId == tableId).ToArray();
+            foreach (var guest in guests)
+            {
+                guest.TableId = null;
+                guest.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+
+            var floorObjects = _db.FloorPlanObjects.Where(item => item.LinkedTableId == tableId).ToArray();
+            _db.FloorPlanObjects.RemoveRange(floorObjects);
+            _db.EventTables.Remove(table);
+            _db.SaveChanges();
+            return true;
         }
 
         public FloorPlanDto? SaveFloorPlan(Guid eventId, FloorPlanSaveRequest request)
@@ -1097,6 +1378,21 @@ namespace Sassoir.Api.Data
                 CreatedAt = DateTimeOffset.UtcNow
             });
             _db.SaveChanges();
+        }
+
+        public IReadOnlyList<AdminGuestMessageDto> GetGuestMessages(Guid eventId)
+        {
+            return _db.GuestMessages
+                .AsNoTracking()
+                .Include(item => item.Guest)
+                .Where(item => item.EventId == eventId)
+                .OrderByDescending(item => item.CreatedAt)
+                .Select(item => new AdminGuestMessageDto(
+                    item.Id,
+                    item.Guest == null ? "Guest" : item.Guest.DisplayName,
+                    item.Message,
+                    item.CreatedAt))
+                .ToArray();
         }
 
         public void TrackSearch(string slug, string normalizedQuery, bool successful)
@@ -1153,6 +1449,9 @@ namespace Sassoir.Api.Data
                   add column if not exists notes text,
                   add column if not exists status text not null default 'Active';
 
+                alter table event_tables
+                  add column if not exists notes text;
+
                 create index if not exists ix_guests_event_status_table on guests(event_id, status, table_id);
             """);
         }
@@ -1176,9 +1475,23 @@ namespace Sassoir.Api.Data
             return organization;
         }
 
-        private static EventDetails ToEventDetails(EventEntity eventEntity)
+        private static PublicEventDto ToPublicEventDto(EventEntity eventEntity)
         {
-            var theme = eventEntity.Theme is null
+            var theme = ToEventTheme(eventEntity);
+            return new PublicEventDto(
+                eventEntity.Name,
+                eventEntity.Slug,
+                eventEntity.EventType,
+                eventEntity.Subtitle,
+                eventEntity.DateLabel,
+                eventEntity.VenueName,
+                eventEntity.VenueAddress,
+                theme);
+        }
+
+        private static EventTheme ToEventTheme(EventEntity eventEntity)
+        {
+            return eventEntity.Theme is null
                 ? new EventTheme(BuildLogoText(eventEntity.Name), string.Empty, "#D8CFBC", "#565449", "#FFFBF4", "#11120D", $"Welcome to {eventEntity.Name}", "Search by name", "Search by name", null)
                 : new EventTheme(
                     eventEntity.Theme.LogoText,
@@ -1191,11 +1504,44 @@ namespace Sassoir.Api.Data
                     string.IsNullOrWhiteSpace(eventEntity.Theme.SearchInputLabel) ? "Search by name" : eventEntity.Theme.SearchInputLabel,
                     string.IsNullOrWhiteSpace(eventEntity.Theme.SearchPlaceholder) ? "Search by name" : eventEntity.Theme.SearchPlaceholder,
                     eventEntity.Theme.HeroImageUrl);
+        }
 
+        private static FloorPlanDto ToFloorPlanDto(EventEntity eventEntity)
+        {
             var floorPlan = eventEntity.FloorPlans
                 .Where(item => item.IsActive)
                 .OrderByDescending(item => item.Version)
                 .FirstOrDefault();
+
+            return new FloorPlanDto(
+                floorPlan?.Name ?? "Venue layout",
+                floorPlan?.CanvasAspectRatio ?? 1.14m,
+                floorPlan?.Objects
+                    .Where(item => item.IsVisible)
+                    .OrderBy(item => item.ZIndex)
+                    .Select(item =>
+                    {
+                        var linkedTable = item.LinkedTableId is null ? null : eventEntity.Tables.FirstOrDefault(table => table.Id == item.LinkedTableId);
+                        return new FloorPlanObjectDto(
+                            item.Id,
+                            item.ObjectType,
+                            item.Label,
+                            item.LinkedTableId,
+                            linkedTable?.Code,
+                            linkedTable?.Name,
+                            item.X,
+                            item.Y,
+                            item.Width,
+                            item.Height,
+                            item.Shape,
+                            item.ZIndex);
+                    })
+                    .ToArray() ?? []);
+        }
+
+        private static EventDetails ToEventDetails(EventEntity eventEntity)
+        {
+            var theme = ToEventTheme(eventEntity);
 
             return new EventDetails(
                 eventEntity.Id,
@@ -1208,25 +1554,7 @@ namespace Sassoir.Api.Data
                 eventEntity.VenueAddress,
                 eventEntity.Status,
                 theme,
-                new FloorPlanDto(
-                    floorPlan?.Name ?? "Venue layout",
-                    floorPlan?.CanvasAspectRatio ?? 1.14m,
-                    floorPlan?.Objects
-                        .Where(item => item.IsVisible)
-                        .OrderBy(item => item.ZIndex)
-                        .Select(item => new FloorPlanObjectDto(
-                            item.Id,
-                            item.ObjectType,
-                            item.Label,
-                            item.LinkedTableId,
-                            item.LinkedTableId is null ? null : eventEntity.Tables.FirstOrDefault(table => table.Id == item.LinkedTableId)?.Code,
-                            item.X,
-                            item.Y,
-                            item.Width,
-                            item.Height,
-                            item.Shape,
-                            item.ZIndex))
-                        .ToArray() ?? []),
+                ToFloorPlanDto(eventEntity),
                 eventEntity.Guests.Select(ToGuest).ToList());
         }
 
@@ -1372,12 +1700,40 @@ namespace Sassoir.Api.Data
                 table.Name,
                 table.Code,
                 table.Capacity,
-                table.Guests.Count(guest => CountsTowardSeating(guest.Status)));
+                table.Guests.Count(guest => CountsTowardSeating(guest.Status)),
+                NormalizeTableShape(table.Shape),
+                table.Notes ?? string.Empty);
         }
 
         private static bool CountsTowardSeating(GuestStatus status)
         {
             return status is GuestStatus.Active or GuestStatus.CheckedIn;
+        }
+
+        private static string NormalizeTableShape(string? shape)
+        {
+            return (shape ?? "round").Trim().ToLowerInvariant() switch
+            {
+                "square" => "square",
+                "rectangle" => "rectangle",
+                "tear" or "tear-shaped" or "tear shaped" => "tear",
+                _ => "round"
+            };
+        }
+
+        private static string ToFloorShape(string? shape)
+        {
+            return NormalizeTableShape(shape);
+        }
+
+        private static decimal ShapeDefaultWidth(string? shape)
+        {
+            return NormalizeTableShape(shape) == "rectangle" ? 0.18m : 0.14m;
+        }
+
+        private static decimal ShapeDefaultHeight(string? shape)
+        {
+            return NormalizeTableShape(shape) == "rectangle" ? 0.11m : 0.14m;
         }
 
         private static string BuildLogoText(string name)
@@ -1413,7 +1769,9 @@ namespace Sassoir.Api.Data
         public string Issuer { get; set; } = "sassoir.local";
         public string Audience { get; set; } = "sassoir.admin";
         public string SigningKey { get; set; } = string.Empty;
-        public int AccessTokenMinutes { get; set; } = 30;
+        public int AccessTokenMinutes { get; set; } = 120;
+        public int RefreshTokenHours { get; set; } = 24;
+        public int PasswordResetTokenMinutes { get; set; } = 30;
         public string SeedAdminEmail { get; set; } = "admin@sassoir.com";
         public string SeedAdminPassword { get; set; } = string.Empty;
     }
@@ -1450,10 +1808,34 @@ namespace Sassoir.Api.Data
             var roles = user.UserRoles.Select(item => item.Role?.Name).Where(item => item is not null).Cast<string>().ToArray();
             return new LoginResponse(
                 TokenSigner.Create(user, roles, _options),
+                TokenSigner.CreateRefresh(user, _options),
                 user.Email,
                 $"{user.FirstName} {user.LastName}".Trim(),
                 roles,
-                DateTimeOffset.UtcNow.AddMinutes(_options.AccessTokenMinutes));
+                DateTimeOffset.UtcNow.AddMinutes(_options.AccessTokenMinutes),
+                DateTimeOffset.UtcNow.AddHours(_options.RefreshTokenHours));
+        }
+
+        public LoginResponse? Refresh(string refreshToken)
+        {
+            var claims = TokenSigner.Validate(refreshToken, _options, "refresh");
+            if (claims is null) return null;
+
+            var user = _db.Users
+                .Include(item => item.UserRoles)
+                    .ThenInclude(item => item.Role)
+                .SingleOrDefault(item => item.Id == claims.UserId && item.Status == "Active");
+            if (user is null) return null;
+
+            var roles = user.UserRoles.Select(item => item.Role?.Name).Where(item => item is not null).Cast<string>().ToArray();
+            return new LoginResponse(
+                TokenSigner.Create(user, roles, _options),
+                TokenSigner.CreateRefresh(user, _options),
+                user.Email,
+                $"{user.FirstName} {user.LastName}".Trim(),
+                roles,
+                DateTimeOffset.UtcNow.AddMinutes(_options.AccessTokenMinutes),
+                DateTimeOffset.UtcNow.AddHours(_options.RefreshTokenHours));
         }
 
         public CurrentUserDto? GetCurrentUser(HttpRequest request)
@@ -1470,12 +1852,51 @@ namespace Sassoir.Api.Data
             return claims?.Roles.Any(role => role is "Admin" or "SuperAdmin") == true;
         }
 
+        public string? ChangePassword(HttpRequest request, string currentPassword, string newPassword)
+        {
+            var claims = ValidateRequest(request);
+            if (claims is null) return "unauthorized";
+            if (newPassword.Length < 8) return "New password must be at least 8 characters.";
+
+            var user = _db.Users.SingleOrDefault(item => item.Id == claims.UserId && item.Status == "Active");
+            if (user is null) return "unauthorized";
+            if (!PasswordHasher.Verify(currentPassword, user.PasswordHash)) return "Current password is incorrect.";
+
+            user.PasswordHash = PasswordHasher.Hash(newPassword);
+            user.UpdatedAt = DateTimeOffset.UtcNow;
+            _db.SaveChanges();
+            return null;
+        }
+
+        public string? CreatePasswordReset(string email)
+        {
+            var normalizedEmail = email.Trim().ToLowerInvariant();
+            var user = _db.Users.SingleOrDefault(item => item.Email.ToLower() == normalizedEmail && item.Status == "Active");
+            return user is null ? null : TokenSigner.CreatePasswordReset(user, _options);
+        }
+
+        public string? ResetPassword(string resetToken, string newPassword)
+        {
+            if (newPassword.Length < 8) return "New password must be at least 8 characters.";
+
+            var claims = TokenSigner.Validate(resetToken, _options, "password-reset");
+            if (claims is null) return "unauthorized";
+
+            var user = _db.Users.SingleOrDefault(item => item.Id == claims.UserId && item.Status == "Active");
+            if (user is null) return "unauthorized";
+
+            user.PasswordHash = PasswordHasher.Hash(newPassword);
+            user.UpdatedAt = DateTimeOffset.UtcNow;
+            _db.SaveChanges();
+            return null;
+        }
+
         private TokenClaims? ValidateRequest(HttpRequest request)
         {
             var authorization = request.Headers.Authorization.ToString();
             if (!authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return null;
 
-            return TokenSigner.Validate(authorization["Bearer ".Length..].Trim(), _options);
+            return TokenSigner.Validate(authorization["Bearer ".Length..].Trim(), _options, "access");
         }
 
         private void EnsureAuthTables()
@@ -1561,6 +1982,21 @@ namespace Sassoir.Api.Data
     {
         public static string Create(AppUserEntity user, string[] roles, AuthOptions options)
         {
+            return Create(user, roles, options, "access", DateTimeOffset.UtcNow.AddMinutes(options.AccessTokenMinutes));
+        }
+
+        public static string CreateRefresh(AppUserEntity user, AuthOptions options)
+        {
+            return Create(user, [], options, "refresh", DateTimeOffset.UtcNow.AddHours(options.RefreshTokenHours));
+        }
+
+        public static string CreatePasswordReset(AppUserEntity user, AuthOptions options)
+        {
+            return Create(user, [], options, "password-reset", DateTimeOffset.UtcNow.AddMinutes(options.PasswordResetTokenMinutes));
+        }
+
+        private static string Create(AppUserEntity user, string[] roles, AuthOptions options, string tokenType, DateTimeOffset expiresAt)
+        {
             var now = DateTimeOffset.UtcNow;
             var payload = new Dictionary<string, object?>
             {
@@ -1570,8 +2006,9 @@ namespace Sassoir.Api.Data
                 ["email"] = user.Email,
                 ["name"] = $"{user.FirstName} {user.LastName}".Trim(),
                 ["roles"] = roles,
+                ["typ"] = tokenType,
                 ["iat"] = now.ToUnixTimeSeconds(),
-                ["exp"] = now.AddMinutes(options.AccessTokenMinutes).ToUnixTimeSeconds()
+                ["exp"] = expiresAt.ToUnixTimeSeconds()
             };
 
             var header = Base64Url(JsonSerializer.SerializeToUtf8Bytes(new { alg = "HS256", typ = "JWT" }));
@@ -1581,7 +2018,7 @@ namespace Sassoir.Api.Data
             return $"{unsigned}.{signature}";
         }
 
-        public static TokenClaims? Validate(string token, AuthOptions options)
+        public static TokenClaims? Validate(string token, AuthOptions options, string expectedTokenType)
         {
             var parts = token.Split('.');
             if (parts.Length != 3) return null;
@@ -1598,6 +2035,8 @@ namespace Sassoir.Api.Data
             if (root.GetProperty("iss").GetString() != options.Issuer) return null;
             if (root.GetProperty("aud").GetString() != options.Audience) return null;
             if (root.GetProperty("exp").GetInt64() <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
+            if (root.TryGetProperty("typ", out var tokenType) && tokenType.GetString() != expectedTokenType) return null;
+            if (!root.TryGetProperty("typ", out _) && expectedTokenType != "access") return null;
             if (!Guid.TryParse(root.GetProperty("sub").GetString(), out var userId)) return null;
 
             var roles = root.GetProperty("roles").EnumerateArray().Select(item => item.GetString()).Where(item => item is not null).Cast<string>().ToArray();
@@ -1804,6 +2243,7 @@ namespace Sassoir.Api.Models
         string Label,
         Guid? LinkedTableId,
         string? TableCode,
+        string? TableName,
         decimal X,
         decimal Y,
         decimal Width,
@@ -1813,9 +2253,17 @@ namespace Sassoir.Api.Models
 
     public sealed record LoginRequest(string Email, string Password);
 
-    public sealed record LoginResponse(string Token, string Email, string DisplayName, string[] Roles, DateTimeOffset ExpiresAt);
+    public sealed record RefreshTokenRequest(string RefreshToken);
+
+    public sealed record LoginResponse(string Token, string RefreshToken, string Email, string DisplayName, string[] Roles, DateTimeOffset ExpiresAt, DateTimeOffset RefreshExpiresAt);
 
     public sealed record CurrentUserDto(string Email, string DisplayName, string[] Roles);
+
+    public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);
+
+    public sealed record ForgotPasswordRequest(string Email);
+
+    public sealed record ResetPasswordRequest(string ResetToken, string NewPassword);
 
     public sealed record UploadResponse(string Url);
 
@@ -1845,9 +2293,13 @@ namespace Sassoir.Api.Models
 
     public sealed record AssignGuestTableRequest(Guid? TableId);
 
-    public sealed record AdminTableDto(Guid Id, string Name, string Number, int MaximumCapacity, int AssignedGuestCount);
+    public sealed record BulkAssignGuestTableRequest(IReadOnlyList<Guid> GuestIds, Guid? TableId);
 
-    public sealed record AdminTableCreateRequest(string Name, string Number, int MaximumCapacity);
+    public sealed record AdminTableDto(Guid Id, string Name, string Number, int MaximumCapacity, int AssignedGuestCount, string Shape, string Notes);
+
+    public sealed record AdminTableCreateRequest(string Name, string Number, int MaximumCapacity, string? Shape, string? Notes);
+
+    public sealed record AdminTableUpsertRequest(string Name, string Number, int MaximumCapacity, string? Shape, string? Notes, decimal? Width, decimal? Height);
 
     public sealed record FloorPlanSaveRequest(FloorPlanObjectSaveDto[] Objects);
 
@@ -1933,6 +2385,8 @@ namespace Sassoir.Api.Models
     public sealed record GuestFloorPlanDto(FloorPlanDto FloorPlan, string HighlightedObjectId);
 
     public sealed record GuestMessageRequest(string Message);
+
+    public sealed record AdminGuestMessageDto(Guid Id, string GuestName, string Message, DateTimeOffset CreatedAt);
 
     public sealed record GuestMessage(string EventSlug, string PublicToken, string Message, DateTimeOffset CreatedAt);
 

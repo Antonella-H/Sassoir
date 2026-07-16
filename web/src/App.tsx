@@ -9,7 +9,6 @@ import {
   Download,
   Eye,
   FileWarning,
-  Globe2,
   LayoutDashboard,
   Lock,
   LogOut,
@@ -72,11 +71,12 @@ type FloorObject = {
   label: string;
   linkedTableId?: string | null;
   tableCode?: string | null;
+  tableName?: string | null;
   x: number;
   y: number;
   width: number;
   height: number;
-  shape: "round" | "rect";
+  shape: "round" | "square" | "rectangle" | "tear" | "rect";
   zIndex?: number;
 };
 
@@ -99,6 +99,23 @@ type AdminTable = {
   number: string;
   maximumCapacity: number;
   assignedGuestCount: number;
+  shape: "round" | "square" | "rectangle" | "tear";
+  notes: string;
+};
+
+type AdminTableDraft = {
+  name: string;
+  number: string;
+  maximumCapacity: number;
+  shape: AdminTable["shape"];
+  notes: string;
+};
+
+type AdminGuestMessage = {
+  id: string;
+  guestName: string;
+  message: string;
+  createdAt: string;
 };
 
 type PublicEvent = {
@@ -150,6 +167,13 @@ type AdminUser = {
   email: string;
   displayName: string;
   roles: string[];
+};
+
+type AuthPayload = AdminUser & {
+  token: string;
+  refreshToken: string;
+  expiresAt: string;
+  refreshExpiresAt: string;
 };
 
 type AdminEventDraft = {
@@ -291,6 +315,12 @@ const fallbackFloorObjects: FloorObject[] = [
 
 const eventTypeOptions = ["Wedding", "Corporate", "Gala", "Conference", "Birthday", "Private Dinner", "Other"];
 const eventStatusOptions = ["Draft", "Published", "Archived"];
+const tableShapeOptions: Array<{ value: AdminTable["shape"]; label: string }> = [
+  { value: "round", label: "Round" },
+  { value: "square", label: "Square" },
+  { value: "rectangle", label: "Rectangle" },
+  { value: "tear", label: "Tear shaped" },
+];
 const floorSectionTemplates: Array<Pick<FloorObject, "type" | "label" | "width" | "height" | "shape">> = [
   { type: "stage", label: "Stage", width: 0.34, height: 0.1, shape: "rect" },
   { type: "dance", label: "Dance Floor", width: 0.26, height: 0.2, shape: "rect" },
@@ -348,7 +378,11 @@ const eventFormSections: EventSectionDefinition[] = [
     name: "Floor Plan",
     subsections: [
       {
-        name: "Tables & design",
+        name: "Tables",
+        fields: [],
+      },
+      {
+        name: "Design",
         fields: [],
       },
     ],
@@ -357,7 +391,11 @@ const eventFormSections: EventSectionDefinition[] = [
     name: "Setup",
     subsections: [
       {
-        name: "QR code",
+        name: "QR Code",
+        fields: [],
+      },
+      {
+        name: "Guest messages",
         fields: [],
       },
     ],
@@ -432,13 +470,19 @@ function toFloorObjects(objects: any[] | undefined): FloorObject[] {
     label: String(item.label ?? ""),
     linkedTableId: item.linkedTableId ?? null,
     tableCode: item.tableCode ?? null,
+    tableName: item.tableName ?? null,
     x: Number(item.x),
     y: Number(item.y),
     width: Number(item.width),
     height: Number(item.height),
-    shape: item.shape === "round" ? "round" : "rect",
+    shape: normalizeFloorShape(item.shape),
     zIndex: Number(item.zIndex ?? 0),
   }));
+}
+
+function normalizeFloorShape(shape: unknown): FloorObject["shape"] {
+  if (shape === "round" || shape === "square" || shape === "rectangle" || shape === "tear" || shape === "rect") return shape;
+  return "rect";
 }
 
 function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
@@ -454,11 +498,12 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
       label: table.name || `Table ${table.number}`,
       linkedTableId: table.id,
       tableCode: table.number,
+      tableName: table.name,
       x: 0.12 + (index % 4) * 0.18,
       y: 0.24 + Math.floor(index / 4) * 0.18,
-      width: 0.14,
-      height: 0.14,
-      shape: "round",
+      width: table.shape === "rectangle" ? 0.18 : 0.14,
+      height: table.shape === "rectangle" ? 0.11 : 0.14,
+      shape: table.shape,
       zIndex: 5 + index,
     });
   });
@@ -508,6 +553,25 @@ function safeRemoveStorage(key: string) {
   } catch {
     // The app should still work in restricted preview browsers.
   }
+}
+
+function saveAdminSession(payload: AuthPayload) {
+  safeSetStorage("sassoir_admin_token", payload.token);
+  safeSetStorage("sassoir_admin_refresh_token", payload.refreshToken);
+  safeSetStorage("sassoir_admin_expires_at", payload.expiresAt);
+  safeSetStorage("sassoir_admin_refresh_expires_at", payload.refreshExpiresAt);
+}
+
+function clearAdminSession() {
+  safeRemoveStorage("sassoir_admin_token");
+  safeRemoveStorage("sassoir_admin_refresh_token");
+  safeRemoveStorage("sassoir_admin_expires_at");
+  safeRemoveStorage("sassoir_admin_refresh_expires_at");
+}
+
+function parseDateTime(value: string) {
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
 function eventStatusText(status: string | number) {
@@ -561,7 +625,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
             <h1>Something blocked the admin page from rendering.</h1>
             <p>{this.state.error.message}</p>
             <button className="primary-button" type="button" onClick={() => {
-              safeRemoveStorage("sassoir_admin_token");
+              clearAdminSession();
               window.location.assign("/admin");
             }}>Reset Admin Session</button>
           </section>
@@ -862,11 +926,7 @@ function WelcomeScreen({ event, query, results, loading, apiOnline, searchTouche
           backgroundImage: `linear-gradient(180deg, rgba(17,18,13,0.02), rgba(17,18,13,0.2)), url(${heroImageUrl})`,
         }}
         aria-label={`${event.name} photo banner`}
-      >
-        <button className="language-button" type="button" aria-label="Change language">
-          <Globe2 aria-hidden="true" />
-        </button>
-      </header>
+      />
 
       <section className="guest-welcome-content">
         <p className="guest-welcome-note">{welcomeTitle}</p>
@@ -923,7 +983,7 @@ function SeatScreen({ guest, floorObjects, message, sent, onBack, onMessageChang
       <section className="guest-seat-content">
         <header className="guest-seat-hero">
           <h1>Welcome, {guest.displayName.split(" ")[0]}!</h1>
-          <p>You are on the table <strong>{guest.tableCode}</strong></p>
+          <p className="guest-table-assignment">You are on table <strong>{guest.tableCode}{guest.tableName ? ` - "${guest.tableName}"` : ""}</strong></p>
           <span>Please find your way to your table</span>
         </header>
 
@@ -964,15 +1024,21 @@ function MinimalFloorPlan({ tableCode }: { tableCode: string }) {
 
 function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject[]; tableCode: string }) {
   const objects = floorObjects.length > 0 ? floorObjects : fallbackFloorObjects;
-  const hasDynamicTable = objects.some((object) => object.type === "table" && (object.tableCode === tableCode || object.id === `table-${tableCode}`));
+  const highlightedObject = objects.find((object) => object.type === "table" && (object.tableCode === tableCode || object.id === `table-${tableCode}`));
+  const entranceObject = objects.find((object) => object.type === "entrance");
 
-  if (!hasDynamicTable) return <MinimalFloorPlan tableCode={tableCode} />;
+  if (!highlightedObject) return <MinimalFloorPlan tableCode={tableCode} />;
+
+  const routeStart = centerOfObject(entranceObject ?? { x: 0.12, y: 0.84, width: 0.16, height: 0.08 });
+  const routeEnd = centerOfObject(highlightedObject);
 
   return (
     <section className="minimal-floor-plan" aria-label={`Floor plan highlighting table ${tableCode}`}>
-      <div className="guest-plan-route" aria-hidden="true" />
+      <svg className="guest-plan-route-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <path d={`M ${routeStart.x} ${routeStart.y} L ${routeStart.x} ${routeEnd.y} L ${routeEnd.x} ${routeEnd.y}`} />
+      </svg>
       {objects.map((object) => {
-        const highlighted = object.type === "table" && (object.tableCode === tableCode || object.id === `table-${tableCode}`);
+        const highlighted = object.id === highlightedObject.id;
         return (
           <div
             className={`guest-plan-object ${object.type} ${object.shape} ${highlighted ? "highlighted" : ""}`}
@@ -986,12 +1052,19 @@ function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject
             }}
             aria-label={`${object.label}${highlighted ? ", your table" : ""}`}
           >
-            {object.type === "table" ? object.tableCode ?? object.label.replace(/^Table\s+/i, "") : object.label}
+            {object.type === "table" ? object.tableName || object.tableCode || object.label.replace(/^Table\s+/i, "") : object.label}
           </div>
         );
       })}
     </section>
   );
+}
+
+function centerOfObject(object: Pick<FloorObject, "x" | "y" | "width" | "height">) {
+  return {
+    x: (object.x + object.width / 2) * 100,
+    y: (object.y + object.height / 2) * 100,
+  };
 }
 
 function FloorPlanScreen({ event, guest, floorObjects, highlightedTableId, zoom, onBack, onZoomIn, onZoomOut, onCenter }: {
@@ -1073,6 +1146,7 @@ function NotFoundScreen({ state, eventSlug }: { state: Exclude<PublicLoadState, 
 function AdminDashboard({ page }: { page: AdminPage }) {
   const [events, setEvents] = useState<AdminEvent[]>([]);
   const [token, setToken] = useState(() => safeGetStorage("sassoir_admin_token"));
+  const [refreshToken, setRefreshToken] = useState(() => safeGetStorage("sassoir_admin_refresh_token"));
   const [user, setUser] = useState<AdminUser | null>(null);
   const [apiOnline, setApiOnline] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -1080,6 +1154,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
   const [error, setError] = useState("");
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
   const [draft, setDraft] = useState<AdminEventDraft>(emptyEventDraft());
+  const [showPasswordDialog, setShowPasswordDialog] = useState(false);
 
   const resetDraft = () => {
     setEditingEventId(null);
@@ -1087,15 +1162,61 @@ function AdminDashboard({ page }: { page: AdminPage }) {
     setError("");
   };
 
+  const endSession = useCallback((message = "") => {
+    clearAdminSession();
+    setToken("");
+    setRefreshToken("");
+    setUser(null);
+    setEvents([]);
+    setError(message);
+    setEditingEventId(null);
+    setDraft(emptyEventDraft());
+  }, []);
+
+  const refreshAdminSession = useCallback(async () => {
+    if (!refreshToken) return null;
+
+    const refreshExpiry = parseDateTime(safeGetStorage("sassoir_admin_refresh_expires_at"));
+    if (refreshExpiry && refreshExpiry <= Date.now()) {
+      endSession("Your admin session expired. Please sign in again.");
+      return null;
+    }
+
+    const response = await fetch(apiUrl("/api/auth/refresh"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!response.ok) {
+      endSession("Your admin session expired. Please sign in again.");
+      return null;
+    }
+
+    const payload = (await response.json()) as AuthPayload;
+    saveAdminSession(payload);
+    setToken(payload.token);
+    setRefreshToken(payload.refreshToken);
+    setUser({ email: payload.email, displayName: payload.displayName, roles: payload.roles });
+    return payload.token;
+  }, [endSession, refreshToken]);
+
   const loadEvents = useCallback(async (authToken: string) => {
     setLoading(true);
     setError("");
 
     try {
-      const response = await fetch(apiUrl("/api/admin/events"), {
+      let response = await fetch(apiUrl("/api/admin/events"), {
         headers: { Authorization: `Bearer ${authToken}` },
       });
-      if (response.status === 401) throw new Error("Your admin session expired. Please sign in again.");
+      if (response.status === 401) {
+        const nextToken = await refreshAdminSession();
+        if (!nextToken) {
+          throw new Error("Your admin session expired. Please sign in again.");
+        }
+        response = await fetch(apiUrl("/api/admin/events"), {
+          headers: { Authorization: `Bearer ${nextToken}` },
+        });
+      }
       if (!response.ok) throw new Error("Could not load events.");
 
       const payload = (await response.json()) as AdminEvent[];
@@ -1103,12 +1224,11 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       setApiOnline(true);
     } catch (loadError) {
       setApiOnline(false);
-      setEvents(fallbackAdminEvents);
       setError(loadError instanceof Error ? loadError.message : "Could not load events.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshAdminSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1120,6 +1240,12 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         const response = await fetch(apiUrl("/api/auth/me"), {
           headers: { Authorization: `Bearer ${token}` },
         });
+        if (response.status === 401) {
+          const nextToken = await refreshAdminSession();
+          if (!nextToken) return;
+          await loadEvents(nextToken);
+          return;
+        }
         if (!response.ok) throw new Error("Session unavailable");
         const payload = (await response.json()) as AdminUser;
         if (cancelled) return;
@@ -1127,9 +1253,8 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         await loadEvents(token);
       } catch {
         if (!cancelled) {
-          setUser({ email: "admin@sassoir.com", displayName: "Sassoir Admin", roles: ["Admin"] });
-          setEvents(fallbackAdminEvents);
           setApiOnline(false);
+          endSession("Your admin session expired. Please sign in again.");
         }
       }
     }
@@ -1138,7 +1263,18 @@ function AdminDashboard({ page }: { page: AdminPage }) {
     return () => {
       cancelled = true;
     };
-  }, [loadEvents, token]);
+  }, [endSession, loadEvents, refreshAdminSession, token]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const scheduleMs = Math.max(15_000, parseDateTime(safeGetStorage("sassoir_admin_expires_at")) - Date.now() - 60_000);
+    const timer = window.setTimeout(() => {
+      void refreshAdminSession();
+    }, scheduleMs);
+
+    return () => window.clearTimeout(timer);
+  }, [refreshAdminSession, token]);
 
   async function handleLogin(email: string, password: string) {
     setLoading(true);
@@ -1152,9 +1288,10 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       });
       if (!response.ok) throw new Error("Invalid email or password.");
 
-      const payload = (await response.json()) as { token: string; email: string; displayName: string; roles: string[] };
-      safeSetStorage("sassoir_admin_token", payload.token);
+      const payload = (await response.json()) as AuthPayload;
+      saveAdminSession(payload);
       setToken(payload.token);
+      setRefreshToken(payload.refreshToken);
       setUser({ email: payload.email, displayName: payload.displayName, roles: payload.roles });
       await loadEvents(payload.token);
     } catch (loginError) {
@@ -1165,11 +1302,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
   }
 
   function handleLogout() {
-    safeRemoveStorage("sassoir_admin_token");
-    setToken("");
-    setUser(null);
-    setEvents([]);
-    resetDraft();
+    endSession();
   }
 
   function navigateAdmin(path: string) {
@@ -1332,6 +1465,35 @@ function AdminDashboard({ page }: { page: AdminPage }) {
     }
   }
 
+  async function changePassword(currentPassword: string, newPassword: string) {
+    if (!token) return;
+
+    setSaving(true);
+    setError("");
+
+    try {
+      const response = await fetch(apiUrl("/api/auth/change-password"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      if (response.status === 401) {
+        endSession("Your admin session expired. Please sign in again.");
+        return;
+      }
+      if (!response.ok) throw new Error(await readError(response));
+      setShowPasswordDialog(false);
+      setError("Password updated.");
+    } catch (passwordError) {
+      setError(passwordError instanceof Error ? passwordError.message : "Could not update password.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const adminPath = window.location.pathname;
   const eventRouteMatch = adminPath.match(/^\/admin\/events\/([^/]+)/);
   const routedEventId = eventRouteMatch?.[1] && eventRouteMatch[1] !== "new" ? eventRouteMatch[1] : "";
@@ -1387,7 +1549,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
           <button type="button"><ClipboardList aria-hidden="true" />Notifications</button>
           <button className={page === "settings" ? "active" : ""} type="button" onClick={() => navigateAdmin("/admin/settings")}><Settings aria-hidden="true" />Setup</button>
           <button type="button"><Users aria-hidden="true" />Profile</button>
-          <button type="button"><Lock aria-hidden="true" />Change password</button>
+          <button type="button" onClick={() => setShowPasswordDialog(true)}><Lock aria-hidden="true" />Change password</button>
           <button type="button" onClick={handleLogout}><LogOut aria-hidden="true" />Sign out</button>
         </nav>
         <button className="profile-chip" type="button">
@@ -1444,11 +1606,20 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         ) : null}
 
         {page === "guests" ? <GuestsPage event={selectedEvent} token={token} /> : null}
-        {page === "floor-plan" ? <FloorPlanAdminPage event={selectedEvent} token={token} /> : null}
+        {page === "floor-plan" ? <FloorPlanAdminPage event={selectedEvent} token={token} activeSubsection="Design" /> : null}
         {page === "publish" ? <PublishPage events={events} saving={saving} onSetPublication={(eventId, status) => void setEventPublication(eventId, status)} /> : null}
         {page === "analytics" ? <AnalyticsPage events={events} /> : null}
         {page === "settings" ? <SettingsPage /> : null}
       </section>
+
+      {showPasswordDialog ? (
+        <ChangePasswordDialog
+          saving={saving}
+          error={error}
+          onClose={() => setShowPasswordDialog(false)}
+          onSubmit={(currentPassword, newPassword) => void changePassword(currentPassword, newPassword)}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1741,6 +1912,10 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
   const [importRows, setImportRows] = useState<ImportPreviewRow[]>([]);
   const [showImportDialog, setShowImportDialog] = useState(false);
+  const [selectedGuestIds, setSelectedGuestIds] = useState<string[]>([]);
+  const [bulkTableId, setBulkTableId] = useState("");
+  const [showBulkAssignDialog, setShowBulkAssignDialog] = useState(false);
+  const [guestPage, setGuestPage] = useState(1);
 
   const loadGuests = useCallback(async () => {
     if (!token) return;
@@ -1990,6 +2165,35 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
     }
   }
 
+  async function bulkAssignGuests() {
+    if (!token || selectedGuestIds.length === 0) return;
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/bulk-assign-table`), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ guestIds: selectedGuestIds, tableId: bulkTableId || null }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      setMessage(`${selectedGuestIds.length} guests assigned.`);
+      setSelectedGuestIds([]);
+      setBulkTableId("");
+      setShowBulkAssignDialog(false);
+      await loadGuests();
+    } catch (bulkError) {
+      setError(bulkError instanceof Error ? bulkError.message : "Could not bulk assign guests.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const activeGuests = guests.filter((guest) => guest.status === "Active");
   const seatingGuests = guests.filter((guest) => guest.status === "Active" || guest.status === "CheckedIn");
   const normalizedQuery = normalizeSearch(query);
@@ -2000,12 +2204,22 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
     const matchesTable = tableFilter === "All" || (tableFilter === "Unassigned" ? !guest.tableId : guest.tableId === tableFilter);
     return matchesQuery && matchesStatus && matchesTable;
   });
+  const guestsPerPage = 20;
+  const totalGuestPages = Math.max(1, Math.ceil(visibleGuests.length / guestsPerPage));
+  const currentGuestPage = Math.min(guestPage, totalGuestPages);
+  const pagedGuests = visibleGuests.slice((currentGuestPage - 1) * guestsPerPage, currentGuestPage * guestsPerPage);
   const assignedGuests = seatingGuests.filter((guest) => guest.tableId).length;
   const unassignedGuests = seatingGuests.length - assignedGuests;
   const duplicateGuests = guests.filter((guest) => guest.isDuplicate).length;
   const selectedGuest = guests.find((guest) => guest.id === selectedGuestId);
   const formTitle = formMode === "create" ? "Create new guest" : formMode === "edit" ? "Edit guest" : "Guest details";
   const canSaveImport = importPreview ? importPreview.rows.some((row) => row.errors.length === 0 && !row.isDuplicate) : false;
+  const pageGuestIds = pagedGuests.map((guest) => guest.id);
+  const pageSelected = pageGuestIds.length > 0 && pageGuestIds.every((id) => selectedGuestIds.includes(id));
+
+  useEffect(() => {
+    setGuestPage(1);
+  }, [query, statusFilter, tableFilter]);
 
   return (
     <section className="guest-manager">
@@ -2032,6 +2246,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
           <Upload aria-hidden="true" />
           Import
         </button>
+        <button className="secondary-button compact-button" type="button" onClick={() => setShowBulkAssignDialog(true)} disabled={saving || selectedGuestIds.length === 0}><Users aria-hidden="true" />Assign selected</button>
         <button className="primary-button create-object-button" type="button" onClick={startCreateGuest}><Plus aria-hidden="true" />Create new guest</button>
       </div>
 
@@ -2060,6 +2275,83 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
             </div>
           </section>
         </div>
+      ) : null}
+
+      {showBulkAssignDialog ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-label="Bulk assign guests">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Bulk assign</p>
+                <h2>Assign {selectedGuestIds.length} selected guests</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setShowBulkAssignDialog(false)} aria-label="Close bulk assign dialog"><X aria-hidden="true" /></button>
+            </div>
+            <label className="modal-field">
+              Table
+              <select value={bulkTableId} onChange={(formEvent) => setBulkTableId(formEvent.target.value)}>
+                <option value="">System: unassigned</option>
+                {tables.map((table) => <option key={table.id} value={table.id}>Table {table.number} - {table.name}</option>)}
+              </select>
+            </label>
+            <div className="form-actions">
+              <button className="secondary-button compact-button" type="button" onClick={() => setShowBulkAssignDialog(false)}>Cancel</button>
+              <button className="primary-button compact-button" type="button" onClick={() => void bulkAssignGuests()} disabled={saving}>{saving ? "Assigning..." : "Assign"}</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {formMode !== "closed" ? (
+        <section className="guest-form-panel" aria-label={formTitle}>
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">{formMode === "create" ? "Manual entry" : selectedGuest?.status ?? "Guest record"}</p>
+              <h2>{formTitle}</h2>
+            </div>
+            <button className="icon-button" type="button" onClick={() => setFormMode("closed")} aria-label="Close guest form"><X aria-hidden="true" /></button>
+          </div>
+          <form className="event-form" onSubmit={saveGuest}>
+            <div className="form-field-grid guest-form-grid">
+              <label>
+                First Name
+                <input value={draft.firstName} onChange={(formEvent) => updateGuestName("firstName", formEvent.target.value)} placeholder="Antonella" />
+              </label>
+              <label>
+                Last Name
+                <input value={draft.lastName} onChange={(formEvent) => updateGuestName("lastName", formEvent.target.value)} placeholder="Hitti" />
+              </label>
+              <label>
+                Display Name
+                <input value={draft.displayName} onChange={(formEvent) => setDraft((current) => ({ ...current, displayName: formEvent.target.value }))} placeholder={buildGuestDisplayName(draft.firstName, draft.lastName) || "Antonella Hitti"} />
+              </label>
+              <label>
+                Status
+                <select value={draft.status} onChange={(formEvent) => setDraft((current) => ({ ...current, status: formEvent.target.value as AdminGuest["status"], tableId: formEvent.target.value === "Archived" ? "" : current.tableId }))}>
+                  <option>Active</option>
+                  <option>Cancelled</option>
+                  <option>CheckedIn</option>
+                  <option>Archived</option>
+                </select>
+              </label>
+              <label>
+                Assigned Table
+                <select value={draft.tableId} onChange={(formEvent) => setDraft((current) => ({ ...current, tableId: formEvent.target.value }))} disabled={draft.status === "Archived"}>
+                  <option value="">System: unassigned</option>
+                  {tables.map((table) => <option key={table.id} value={table.id}>Table {table.number} - {table.name}</option>)}
+                </select>
+              </label>
+              <label className="span-3">
+                Notes
+                <textarea value={draft.notes} onChange={(formEvent) => setDraft((current) => ({ ...current, notes: formEvent.target.value }))} rows={4} placeholder="Dietary notes, family group, special handling..." />
+              </label>
+            </div>
+            <div className="form-actions">
+              <button className="secondary-button compact-button" type="button" onClick={() => setFormMode("closed")}>Cancel</button>
+              <button className="primary-button compact-button" type="submit" disabled={saving}>{saving ? "Saving..." : formMode === "create" ? "Create Guest" : "Update Guest"}</button>
+            </div>
+          </form>
+        </section>
       ) : null}
 
       <section className="guest-list-panel">
@@ -2123,6 +2415,19 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
           <table className="admin-table guest-table">
             <thead>
               <tr>
+                <th>
+                  <input
+                    type="checkbox"
+                    checked={pageSelected}
+                    onChange={(formEvent) => {
+                      setSelectedGuestIds((current) => {
+                        const withoutPage = current.filter((id) => !pageGuestIds.includes(id));
+                        return formEvent.target.checked ? [...withoutPage, ...pageGuestIds] : withoutPage;
+                      });
+                    }}
+                    aria-label="Select guests on this page"
+                  />
+                </th>
                 <th>Guest</th>
                 <th>Status</th>
                 <th>Assigned Table</th>
@@ -2132,10 +2437,20 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
               </tr>
             </thead>
             <tbody>
-              {visibleGuests.map((guest) => {
+              {pagedGuests.map((guest) => {
                 const table = tables.find((item) => item.id === guest.tableId);
                 return (
                   <tr key={guest.id}>
+                    <td data-label="Select">
+                      <input
+                        type="checkbox"
+                        checked={selectedGuestIds.includes(guest.id)}
+                        onChange={(formEvent) => {
+                          setSelectedGuestIds((current) => formEvent.target.checked ? [...current, guest.id] : current.filter((id) => id !== guest.id));
+                        }}
+                        aria-label={`Select ${guest.displayName}`}
+                      />
+                    </td>
                     <td data-label="Guest">
                       <button className="guest-name-button" type="button" onClick={() => selectGuest(guest, "details")}>
                         <strong>{guest.displayName}</strong>
@@ -2160,61 +2475,22 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
             </tbody>
           </table>
           {!loading && visibleGuests.length === 0 ? <p className="empty-state">No guests match this view. Create a guest or adjust the filters.</p> : null}
+          {visibleGuests.length > 0 ? (
+            <div className="pagination">
+              <span>Showing {(currentGuestPage - 1) * guestsPerPage + 1}-{Math.min(currentGuestPage * guestsPerPage, visibleGuests.length)} of {visibleGuests.length}</span>
+              <div className="page-nums">
+                {Array.from({ length: totalGuestPages }, (_, index) => index + 1).map((pageNumber) => (
+                  <button className={pageNumber === currentGuestPage ? "active" : ""} key={pageNumber} type="button" onClick={() => setGuestPage(pageNumber)}>
+                    {pageNumber}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
         {loading ? <p className="admin-muted">Loading guests...</p> : null}
       </section>
 
-      {formMode !== "closed" ? (
-        <section className="guest-form-panel" aria-label={formTitle}>
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">{formMode === "create" ? "Manual entry" : selectedGuest?.status ?? "Guest record"}</p>
-              <h2>{formTitle}</h2>
-            </div>
-            <button className="icon-button" type="button" onClick={() => setFormMode("closed")} aria-label="Close guest form"><X aria-hidden="true" /></button>
-          </div>
-          <form className="event-form" onSubmit={saveGuest}>
-            <div className="form-field-grid guest-form-grid">
-              <label>
-                First Name
-                <input value={draft.firstName} onChange={(formEvent) => updateGuestName("firstName", formEvent.target.value)} placeholder="Antonella" />
-              </label>
-              <label>
-                Last Name
-                <input value={draft.lastName} onChange={(formEvent) => updateGuestName("lastName", formEvent.target.value)} placeholder="Hitti" />
-              </label>
-              <label>
-                Display Name
-                <input value={draft.displayName} onChange={(formEvent) => setDraft((current) => ({ ...current, displayName: formEvent.target.value }))} placeholder={buildGuestDisplayName(draft.firstName, draft.lastName) || "Antonella Hitti"} />
-              </label>
-              <label>
-                Status
-                <select value={draft.status} onChange={(formEvent) => setDraft((current) => ({ ...current, status: formEvent.target.value as AdminGuest["status"], tableId: formEvent.target.value === "Archived" ? "" : current.tableId }))}>
-                  <option>Active</option>
-                  <option>Cancelled</option>
-                  <option>CheckedIn</option>
-                  <option>Archived</option>
-                </select>
-              </label>
-              <label>
-                Assigned Table
-                <select value={draft.tableId} onChange={(formEvent) => setDraft((current) => ({ ...current, tableId: formEvent.target.value }))} disabled={draft.status === "Archived"}>
-                  <option value="">System: unassigned</option>
-                  {tables.map((table) => <option key={table.id} value={table.id}>Table {table.number} - {table.name}</option>)}
-                </select>
-              </label>
-              <label className="span-3">
-                Notes
-                <textarea value={draft.notes} onChange={(formEvent) => setDraft((current) => ({ ...current, notes: formEvent.target.value }))} rows={4} placeholder="Dietary notes, family group, special handling..." />
-              </label>
-            </div>
-            <div className="form-actions">
-              <button className="secondary-button compact-button" type="button" onClick={() => setFormMode("closed")}>Cancel</button>
-              <button className="primary-button compact-button" type="submit" disabled={saving}>{saving ? "Saving..." : formMode === "create" ? "Create Guest" : "Update Guest"}</button>
-            </div>
-          </form>
-        </section>
-      ) : null}
     </section>
   );
 }
@@ -2312,16 +2588,101 @@ function parseCsv(text: string) {
   return rows;
 }
 
-function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string }) {
+function csvCell(value: string) {
+  return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
+function emptyTableDraft(): AdminTableDraft {
+  return {
+    name: "",
+    number: "",
+    maximumCapacity: 10,
+    shape: "round",
+    notes: "",
+  };
+}
+
+function parseTableCsv(text: string): AdminTableDraft[] {
+  const rows = parseCsv(text).filter((row) => row.some((cell) => cell.trim().length > 0));
+  if (rows.length === 0) return [];
+
+  const headers = rows[0].map((header) => normalizeCsvHeader(header));
+  return rows.slice(1).map((row) => {
+    const value = (...names: string[]) => {
+      const headerIndex = headers.findIndex((header) => names.includes(header));
+      return headerIndex >= 0 ? row[headerIndex]?.trim() ?? "" : "";
+    };
+
+    const shape = value("shape").toLowerCase();
+    return {
+      name: value("name", "tablename", "table"),
+      number: value("number", "code", "tablenumber"),
+      maximumCapacity: Number(value("maximumcapacity", "capacity", "maxcapacity")) || 1,
+      shape: tableShapeOptions.some((option) => option.value === shape) ? shape as AdminTable["shape"] : "round",
+      notes: value("notes", "note", "comments"),
+    };
+  }).filter((row) => row.name && row.number);
+}
+
+function compareTableNumbers(left: string, right: string) {
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if (!Number.isNaN(leftNumber) && !Number.isNaN(rightNumber) && leftNumber !== rightNumber) {
+    return leftNumber - rightNumber;
+  }
+
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function drawFloorObject(context: CanvasRenderingContext2D, object: FloorObject, canvasWidth: number, canvasHeight: number) {
+  const x = object.x * canvasWidth;
+  const y = object.y * canvasHeight;
+  const width = object.width * canvasWidth;
+  const height = object.height * canvasHeight;
+  const label = object.type === "table"
+    ? `Table ${object.tableCode ?? object.label}${object.tableName ? ` - ${object.tableName}` : ""}`
+    : object.label;
+
+  context.save();
+  context.fillStyle = object.type === "table" ? "#17171a" : object.type === "dance" ? "#f7f7f7" : "#f5f3ee";
+  context.strokeStyle = "#17171a";
+  context.lineWidth = 3;
+
+  context.beginPath();
+  if (object.shape === "round") {
+    context.ellipse(x + width / 2, y + height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
+  } else if (object.shape === "tear") {
+    context.moveTo(x + width * 0.5, y);
+    context.bezierCurveTo(x + width, y + height * 0.08, x + width * 0.95, y + height * 0.72, x + width * 0.5, y + height);
+    context.bezierCurveTo(x + width * 0.05, y + height * 0.72, x, y + height * 0.08, x + width * 0.5, y);
+  } else {
+    context.roundRect(x, y, width, height, object.shape === "rectangle" || object.shape === "rect" ? 10 : 16);
+  }
+  context.fill();
+  context.stroke();
+
+  context.fillStyle = object.type === "table" ? "#ffffff" : "#17171a";
+  context.font = "700 22px Inter, Arial, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText(label, x + width / 2, y + height / 2, Math.max(width - 16, 40));
+  context.restore();
+}
+
+function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEvent; token: string; activeSubsection: string }) {
   const [tables, setTables] = useState<AdminTable[]>([]);
   const [guests, setGuests] = useState<AdminGuest[]>([]);
   const [floorObjects, setFloorObjects] = useState<FloorObject[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showTableForm, setShowTableForm] = useState(false);
+  const [editingTableId, setEditingTableId] = useState("");
+  const [selectedObjectId, setSelectedObjectId] = useState("");
+  const [assignmentQuery, setAssignmentQuery] = useState("");
+  const [designExportOrder, setDesignExportOrder] = useState<"lastName" | "firstName" | "tableNumber">("lastName");
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
-  const [tableDraft, setTableDraft] = useState({ name: "", number: "", maximumCapacity: 10 });
+  const [tableDraft, setTableDraft] = useState<AdminTableDraft>(emptyTableDraft());
 
   const loadFloorPlan = useCallback(async () => {
     if (!token) return;
@@ -2358,7 +2719,29 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
     void loadFloorPlan();
   }, [loadFloorPlan]);
 
-  async function createTable(formEvent: FormEvent<HTMLFormElement>) {
+  function startCreateTable() {
+    setEditingTableId("");
+    setTableDraft(emptyTableDraft());
+    setShowTableForm(true);
+    setError("");
+    setWarning("");
+  }
+
+  function startEditTable(table: AdminTable) {
+    setEditingTableId(table.id);
+    setTableDraft({
+      name: table.name,
+      number: table.number,
+      maximumCapacity: table.maximumCapacity,
+      shape: table.shape,
+      notes: table.notes,
+    });
+    setShowTableForm(true);
+    setError("");
+    setWarning("");
+  }
+
+  async function saveTable(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
     if (!token) return;
 
@@ -2366,22 +2749,100 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
     setError("");
 
     try {
-      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/tables`), {
-        method: "POST",
+      const linkedObject = floorObjects.find((object) => object.linkedTableId === editingTableId);
+      const response = await fetch(apiUrl(editingTableId ? `/api/admin/events/${event.id}/tables/${editingTableId}` : `/api/admin/events/${event.id}/tables`), {
+        method: editingTableId ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(tableDraft),
+        body: JSON.stringify({
+          ...tableDraft,
+          width: linkedObject?.width,
+          height: linkedObject?.height,
+        }),
       });
 
       if (!response.ok) throw new Error(await readError(response));
 
-      setTableDraft({ name: "", number: "", maximumCapacity: 10 });
+      setTableDraft(emptyTableDraft());
+      setEditingTableId("");
       setShowTableForm(false);
       await loadFloorPlan();
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "Could not create table.");
+      setError(createError instanceof Error ? createError.message : "Could not save table.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteTable(table: AdminTable) {
+    if (!token) return;
+
+    setSaving(true);
+    setError("");
+    setWarning("");
+
+    try {
+      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/tables/${table.id}`), {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      if (editingTableId === table.id) {
+        setEditingTableId("");
+        setShowTableForm(false);
+      }
+      await loadFloorPlan();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Could not delete table.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function downloadTableTemplate() {
+    downloadTextFile(
+      "sassoir-table-import-template.csv",
+      "Name,Number,Maximum Capacity,Shape,Notes\nOlive Garden,12,10,round,Near the dance floor\nCedar Grove,8,8,rectangle,Family table\n",
+      "text/csv",
+    );
+  }
+
+  function exportTables() {
+    const lines = ["Name,Number,Maximum Capacity,Shape,Notes"];
+    tables.forEach((table) => {
+      lines.push([table.name, table.number, String(table.maximumCapacity), table.shape, table.notes].map(csvCell).join(","));
+    });
+    downloadTextFile(`${slugify(event.name || "event")}-tables.csv`, `${lines.join("\n")}\n`, "text/csv");
+  }
+
+  async function importTables(file: File | undefined) {
+    if (!file) return;
+    setSaving(true);
+    setError("");
+    setWarning("");
+
+    try {
+      const rows = parseTableCsv(await file.text());
+      if (rows.length === 0) throw new Error("No table rows were found in the import file.");
+
+      for (const row of rows) {
+        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/tables`), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(row),
+        });
+        if (!response.ok) throw new Error(await readError(response));
+      }
+
+      setWarning(`${rows.length} tables imported.`);
+      await loadFloorPlan();
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : "Could not import tables.");
     } finally {
       setSaving(false);
     }
@@ -2417,6 +2878,25 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
       },
     ]);
   }
+
+  function resizeSelectedObject(delta: number) {
+    if (!selectedObjectId) return;
+
+    setFloorObjects((current) => current.map((object) => {
+      if (object.id !== selectedObjectId) return object;
+      return {
+        ...object,
+        width: Math.max(0.04, Math.min(1, object.width + delta)),
+        height: Math.max(0.04, Math.min(1, object.height + delta)),
+      };
+    }));
+  }
+
+  const selectedObject = floorObjects.find((object) => object.id === selectedObjectId);
+  const filteredAssignmentGuests = guests.filter((guest) => {
+    const normalized = normalizeSearch(`${guest.displayName} ${guest.tableCode} ${guest.tableName}`);
+    return !normalizeSearch(assignmentQuery) || normalized.includes(normalizeSearch(assignmentQuery));
+  });
 
   async function assignGuestToTable(guestId: string, tableId: string | null | undefined) {
     if (!token || !tableId) {
@@ -2482,21 +2962,98 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
     }
   }
 
+  function exportDesignGuests() {
+    const sortedGuests = [...guests].sort((left, right) => {
+      if (designExportOrder === "firstName") {
+        return left.firstName.localeCompare(right.firstName) || left.lastName.localeCompare(right.lastName) || left.displayName.localeCompare(right.displayName);
+      }
+
+      if (designExportOrder === "tableNumber") {
+        return compareTableNumbers(left.tableCode, right.tableCode) || left.lastName.localeCompare(right.lastName) || left.firstName.localeCompare(right.firstName);
+      }
+
+      return left.lastName.localeCompare(right.lastName) || left.firstName.localeCompare(right.firstName) || left.displayName.localeCompare(right.displayName);
+    });
+
+    const lines = ["First Name,Last Name,Display Name,Table Number,Table Name,Status"];
+    sortedGuests.forEach((guest) => {
+      lines.push([
+        guest.firstName,
+        guest.lastName,
+        guest.displayName,
+        guest.tableCode || "Unassigned",
+        guest.tableName,
+        guest.status,
+      ].map(csvCell).join(","));
+    });
+
+    downloadTextFile(`${slugify(event.name || "event")}-guest-table-assignments.csv`, `${lines.join("\n")}\n`, "text/csv");
+  }
+
+  function downloadFloorPlanImage() {
+    const canvas = document.createElement("canvas");
+    const width = 1600;
+    const height = 1000;
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
+    context.strokeStyle = "#ededed";
+    context.lineWidth = 1;
+    for (let x = 0; x <= width; x += 40) {
+      context.beginPath();
+      context.moveTo(x, 0);
+      context.lineTo(x, height);
+      context.stroke();
+    }
+    for (let y = 0; y <= height; y += 40) {
+      context.beginPath();
+      context.moveTo(0, y);
+      context.lineTo(width, y);
+      context.stroke();
+    }
+
+    [...floorObjects]
+      .sort((left, right) => (left.zIndex ?? 0) - (right.zIndex ?? 0))
+      .forEach((object) => drawFloorObject(context, object, width, height));
+
+    const link = document.createElement("a");
+    link.href = canvas.toDataURL("image/png");
+    link.download = `${slugify(event.name || "event")}-floor-plan.png`;
+    link.click();
+  }
+
   return (
     <>
+      {activeSubsection === "Tables" ? (
       <section className="admin-panel">
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Tables</p>
             <h2>{event.name}</h2>
           </div>
-          <button className="primary-button compact-button" type="button" onClick={() => setShowTableForm((current) => !current)}><Table2 aria-hidden="true" />Add Table</button>
+          <div className="event-actions">
+            <button className="secondary-button compact-button" type="button" onClick={downloadTableTemplate}><Download aria-hidden="true" />Template</button>
+            <button className="secondary-button compact-button" type="button" onClick={exportTables} disabled={tables.length === 0}><Download aria-hidden="true" />Export</button>
+            <label className="secondary-button compact-button import-button">
+              <Upload aria-hidden="true" />
+              Import
+              <input type="file" accept=".csv,text/csv" onChange={(formEvent) => {
+                void importTables(formEvent.target.files?.[0]);
+                formEvent.target.value = "";
+              }} />
+            </label>
+            <button className="primary-button compact-button" type="button" onClick={startCreateTable}><Table2 aria-hidden="true" />Add Table</button>
+          </div>
         </div>
 
         {error ? <p className="form-error">{error}</p> : null}
 
         {showTableForm ? (
-          <form className="event-form" onSubmit={createTable}>
+          <form className="event-form" onSubmit={saveTable}>
             <div className="form-field-grid">
               <label>
                 Name
@@ -2511,12 +3068,29 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
                 <input type="number" min="1" value={tableDraft.maximumCapacity} onChange={(formEvent) => setTableDraft((current) => ({ ...current, maximumCapacity: Number(formEvent.target.value) }))} />
               </label>
               <label>
-                Assigned Guest Count
-                <input value="0" readOnly />
+                Shape
+                <select value={tableDraft.shape} onChange={(formEvent) => setTableDraft((current) => ({ ...current, shape: formEvent.target.value as AdminTable["shape"] }))}>
+                  {tableShapeOptions.map((shape) => <option key={shape.value} value={shape.value}>{shape.label}</option>)}
+                </select>
+              </label>
+              {editingTableId ? (
+                <label>
+                  Assigned Guest Count
+                  <input value={tables.find((table) => table.id === editingTableId)?.assignedGuestCount ?? 0} readOnly />
+                </label>
+              ) : null}
+              <label className="span-2">
+                Notes
+                <textarea value={tableDraft.notes} onChange={(formEvent) => setTableDraft((current) => ({ ...current, notes: formEvent.target.value }))} rows={3} placeholder="VIP table, aisle access, near stage..." />
               </label>
             </div>
             <div className="form-actions">
-              <button className="primary-button compact-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Create Table"}</button>
+              <button className="secondary-button compact-button" type="button" onClick={() => {
+                setShowTableForm(false);
+                setEditingTableId("");
+                setTableDraft(emptyTableDraft());
+              }}>Cancel</button>
+              <button className="primary-button compact-button" type="submit" disabled={saving}>{saving ? "Saving..." : editingTableId ? "Update Table" : "Create Table"}</button>
             </div>
           </form>
         ) : null}
@@ -2527,8 +3101,11 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
               <tr>
                 <th>Name</th>
                 <th>Number</th>
+                <th>Shape</th>
                 <th>Maximum Capacity</th>
                 <th>Assigned Guests</th>
+                <th>Notes</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -2536,8 +3113,16 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
                 <tr key={table.id}>
                   <td data-label="Name"><strong>{table.name}</strong></td>
                   <td data-label="Number">{table.number}</td>
+                  <td data-label="Shape">{tableShapeOptions.find((shape) => shape.value === table.shape)?.label ?? table.shape}</td>
                   <td data-label="Maximum Capacity">{table.maximumCapacity}</td>
                   <td data-label="Assigned Guests">{table.assignedGuestCount}</td>
+                  <td data-label="Notes">{table.notes || "-"}</td>
+                  <td className="actions-cell" data-label="Actions">
+                    <div className="event-actions">
+                      <button className="icon-button" type="button" onClick={() => startEditTable(table)} aria-label={`Edit table ${table.number}`}><Pencil aria-hidden="true" /></button>
+                      <button className="icon-button danger-button" type="button" onClick={() => void deleteTable(table)} disabled={saving} aria-label={`Delete table ${table.number}`}><Trash2 aria-hidden="true" /></button>
+                    </div>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -2545,14 +3130,25 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
           {!loading && tables.length === 0 ? <p className="empty-state">No tables yet. Add tables before designing the floor plan.</p> : null}
         </div>
       </section>
+      ) : null}
 
+      {activeSubsection === "Design" ? (
       <section className="admin-panel">
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Design</p>
-            <h2>Floor plan designer</h2>
+            <h2>Floor plan</h2>
           </div>
-          <button className="primary-button compact-button" type="button" onClick={() => void saveFloorPlan()} disabled={saving}><Map aria-hidden="true" />{saving ? "Saving..." : "Save Floor Plan"}</button>
+          <div className="event-actions design-export-actions">
+            <select value={designExportOrder} onChange={(formEvent) => setDesignExportOrder(formEvent.target.value as "lastName" | "firstName" | "tableNumber")} aria-label="Order guest assignment export">
+              <option value="lastName">Order by last name</option>
+              <option value="firstName">Order by first name</option>
+              <option value="tableNumber">Order by table number</option>
+            </select>
+            <button className="secondary-button compact-button" type="button" onClick={exportDesignGuests} disabled={guests.length === 0}><Download aria-hidden="true" />Export guests</button>
+            <button className="secondary-button compact-button" type="button" onClick={downloadFloorPlanImage} disabled={floorObjects.length === 0}><Download aria-hidden="true" />Download image</button>
+            <button className="primary-button compact-button" type="button" onClick={() => void saveFloorPlan()} disabled={saving}><Map aria-hidden="true" />{saving ? "Saving..." : "Save Floor Plan"}</button>
+          </div>
         </div>
 
         {warning ? <p className="designer-warning">{warning}</p> : null}
@@ -2563,6 +3159,9 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
               {floorSectionTemplates.map((template) => (
                 <button className="secondary-button compact-button" type="button" key={template.type} onClick={() => addSection(template)}><Plus aria-hidden="true" />{template.label}</button>
               ))}
+              <button className="secondary-button compact-button" type="button" onClick={() => resizeSelectedObject(-0.02)} disabled={!selectedObject}><Minus aria-hidden="true" />Smaller</button>
+              <button className="secondary-button compact-button" type="button" onClick={() => resizeSelectedObject(0.02)} disabled={!selectedObject}><Plus aria-hidden="true" />Bigger</button>
+              {selectedObject ? <span className="designer-selection">Selected: {selectedObject.label}</span> : null}
             </div>
 
             <div className="floor-designer-canvas" onDragOver={(dragEvent) => dragEvent.preventDefault()} onDrop={moveObject} aria-label="Drag tables and venue sections to arrange the floor plan">
@@ -2571,6 +3170,7 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
                   className={`floor-designer-object ${object.type} ${object.shape}`}
                   draggable
                   key={object.id}
+                  onClick={() => setSelectedObjectId(object.id)}
                   onDragStart={(dragEvent) => dragEvent.dataTransfer.setData("floor-object-id", object.id)}
                   onDragOver={object.type === "table" ? (dragEvent) => dragEvent.preventDefault() : undefined}
                   onDrop={object.type === "table" ? (dropEvent) => {
@@ -2588,7 +3188,7 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
                     zIndex: object.zIndex ?? 1,
                   }}
                 >
-                  <span>{object.type === "table" ? `Table ${object.tableCode ?? object.label}` : object.label}</span>
+                  <span>{object.type === "table" ? `Table ${object.tableCode ?? object.label}${object.tableName ? ` - ${object.tableName}` : ""}` : object.label}</span>
                 </div>
               ))}
             </div>
@@ -2599,8 +3199,12 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
               <p className="eyebrow">Guests</p>
               <h3>Drag to a table</h3>
             </div>
+            <label className="admin-search assignment-search">
+              <Search aria-hidden="true" />
+              <input value={assignmentQuery} onChange={(formEvent) => setAssignmentQuery(formEvent.target.value)} placeholder="Search guests" aria-label="Search guests to assign" />
+            </label>
             <div className="guest-chip-list">
-              {guests.map((guest) => (
+              {filteredAssignmentGuests.map((guest) => (
                 <button
                   className={`guest-chip ${guest.tableId ? "assigned" : ""}`}
                   draggable
@@ -2616,6 +3220,7 @@ function FloorPlanAdminPage({ event, token }: { event: AdminEvent; token: string
           </aside>
         </div>
       </section>
+      ) : null}
     </>
   );
 }
@@ -2658,41 +3263,110 @@ function PublishPage({ events, saving, onSetPublication }: {
   );
 }
 
-function EventSetupPage({ event }: { event: AdminEvent }) {
+function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent; token: string; activeSubsection: string }) {
   const published = eventStatusText(event.status).toLowerCase() === "published";
   const publicUrl = getEventPublicUrl(event);
+  const [messages, setMessages] = useState<AdminGuestMessage[]>([]);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!token) return;
+
+    async function loadMessages() {
+      setLoadingMessages(true);
+      try {
+        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/messages`), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("Could not load messages.");
+        const payload = (await response.json()) as AdminGuestMessage[];
+        if (!cancelled) setMessages(payload);
+      } catch {
+        if (!cancelled) setMessages([]);
+      } finally {
+        if (!cancelled) setLoadingMessages(false);
+      }
+    }
+
+    if (published && activeSubsection === "Guest messages") void loadMessages();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSubsection, event.id, published, token]);
+
+  function exportMessages() {
+    const lines = ["Guest Name,Message,Created At"];
+    messages.forEach((message) => {
+      lines.push([message.guestName, message.message, new Date(message.createdAt).toLocaleString()].map(csvCell).join(","));
+    });
+    downloadTextFile(`${slugify(event.name || "event")}-guest-messages.csv`, `${lines.join("\n")}\n`, "text/csv");
+  }
 
   return (
-    <section className="admin-panel setup-panel">
-      <div className="panel-heading">
-        <div>
-          <p className="eyebrow">Setup</p>
-          <h2>Event QR code</h2>
+    <>
+      {activeSubsection === "QR Code" ? (
+      <section className="admin-panel setup-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Setup</p>
+            <h2>Event QR code</h2>
+          </div>
+          <span className={`event-status ${published ? "published" : ""}`}>{eventStatusText(event.status)}</span>
         </div>
-        <span className={`event-status ${published ? "published" : ""}`}>{eventStatusText(event.status)}</span>
-      </div>
-      {published ? (
-        <div className="setup-qr-layout">
-          <QrCodeImage value={publicUrl} label={`QR code for ${event.name}`} />
-          <div className="setup-copy">
-            <strong>{event.name}</strong>
-            <p>{publicUrl}</p>
-            <div className="event-actions">
-              <a className="secondary-button compact-button" href={`/e/${event.slug}`}><Eye aria-hidden="true" />Preview public page</a>
-              <button className="primary-button compact-button" type="button" onClick={() => downloadEventQr(event)}><Download aria-hidden="true" />Download QR</button>
+        {published ? (
+          <div className="setup-qr-layout">
+            <QrCodeImage value={publicUrl} label={`QR code for ${event.name}`} />
+            <div className="setup-copy">
+              <strong>{event.name}</strong>
+              <p>{publicUrl}</p>
+              <div className="event-actions">
+                <a className="secondary-button compact-button" href={`/e/${event.slug}`}><Eye aria-hidden="true" />Preview public page</a>
+                <button className="primary-button compact-button" type="button" onClick={() => downloadEventQr(event)}><Download aria-hidden="true" />Download QR</button>
+              </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="setup-empty-state">
-          <QrCode aria-hidden="true" />
-          <div>
-            <h3>Publish this event to generate its QR code</h3>
-            <p className="admin-muted">The code will point scanners directly to the public event page once publishing is complete.</p>
+        ) : (
+          <div className="setup-empty-state">
+            <QrCode aria-hidden="true" />
+            <div>
+              <h3>Publish this event to generate its QR code</h3>
+              <p className="admin-muted">The code will point scanners directly to the public event page once publishing is complete.</p>
+            </div>
           </div>
-        </div>
-      )}
-    </section>
+        )}
+      </section>
+      ) : null}
+
+      {activeSubsection === "Guest messages" ? (
+        <section className="admin-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Guest messages</p>
+              <h2>Messages guests left</h2>
+            </div>
+            <button className="secondary-button compact-button" type="button" onClick={exportMessages} disabled={messages.length === 0}><Download aria-hidden="true" />Export</button>
+          </div>
+          {published ? (
+            <>
+              {loadingMessages ? <p className="admin-muted">Loading messages...</p> : null}
+              <div className="message-list">
+                {messages.map((message) => (
+                  <article className="message-card" key={message.id}>
+                    <strong>{message.guestName}</strong>
+                    <p>{message.message}</p>
+                    <span>{new Date(message.createdAt).toLocaleString()}</span>
+                  </article>
+                ))}
+              </div>
+              {!loadingMessages && messages.length === 0 ? <p className="empty-state">No guest messages yet.</p> : null}
+            </>
+          ) : (
+            <p className="empty-state">Publish this event before collecting guest messages.</p>
+          )}
+        </section>
+      ) : null}
+    </>
   );
 }
 
@@ -2765,10 +3439,57 @@ function AdminLogin({ onLogin, loading, error }: {
 }) {
   const [email, setEmail] = useState("admin@sassoir.com");
   const [password, setPassword] = useState("P@$$w0rd");
+  const [resetToken, setResetToken] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
+  const [resetError, setResetError] = useState("");
+  const [showReset, setShowReset] = useState(false);
 
   async function submitLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await onLogin(email, password);
+  }
+
+  async function requestReset() {
+    setResetError("");
+    setResetMessage("");
+
+    try {
+      const response = await fetch(apiUrl("/api/auth/forgot-password"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const payload = (await response.json()) as { message: string; resetToken?: string | null };
+      setResetToken(payload.resetToken ?? "");
+      setResetMessage(payload.resetToken ? "Reset token generated for this admin account." : payload.message);
+      setShowReset(true);
+    } catch (forgotError) {
+      setResetError(forgotError instanceof Error ? forgotError.message : "Could not request password reset.");
+    }
+  }
+
+  async function submitReset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setResetError("");
+    setResetMessage("");
+
+    try {
+      const response = await fetch(apiUrl("/api/auth/reset-password"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resetToken, newPassword }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      setPassword(newPassword);
+      setNewPassword("");
+      setResetToken("");
+      setShowReset(false);
+      setResetMessage("Password reset. Sign in with the new password.");
+    } catch (resetSubmitError) {
+      setResetError(resetSubmitError instanceof Error ? resetSubmitError.message : "Could not reset password.");
+    }
   }
 
   return (
@@ -2787,11 +3508,70 @@ function AdminLogin({ onLogin, loading, error }: {
           <label htmlFor="admin-password">Password</label>
           <input id="admin-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" />
           <button className="primary-button" type="submit">{loading ? "Signing in..." : "Sign In"}</button>
+          <button className="secondary-button compact-button" type="button" onClick={() => void requestReset()}>Forgot password</button>
           {error ? <p className="form-error" role="alert">{error}</p> : null}
+          {resetError ? <p className="form-error" role="alert">{resetError}</p> : null}
+          {resetMessage ? <p className="designer-warning" role="status">{resetMessage}</p> : null}
           <p className="login-hint">Testing account: admin@sassoir.com</p>
         </form>
+
+        {showReset ? (
+          <form className="login-form reset-form" onSubmit={submitReset}>
+            <label htmlFor="reset-token">Reset token</label>
+            <textarea id="reset-token" value={resetToken} onChange={(event) => setResetToken(event.target.value)} rows={4} />
+            <label htmlFor="reset-new-password">New password</label>
+            <input id="reset-new-password" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" />
+            <button className="primary-button" type="submit">Reset Password</button>
+          </form>
+        ) : null}
       </section>
     </main>
+  );
+}
+
+function ChangePasswordDialog({ saving, error, onClose, onSubmit }: {
+  saving: boolean;
+  error: string;
+  onClose: () => void;
+  onSubmit: (currentPassword: string, newPassword: string) => void;
+}) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onSubmit(currentPassword, newPassword);
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-label="Change password">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Security</p>
+            <h2>Change password</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close password dialog"><X aria-hidden="true" /></button>
+        </div>
+        <form className="event-form" onSubmit={submit}>
+          <div className="form-field-grid">
+            <label>
+              Current password
+              <input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" />
+            </label>
+            <label>
+              New password
+              <input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" />
+            </label>
+          </div>
+          {error ? <p className="form-error" role="alert">{error}</p> : null}
+          <div className="form-actions">
+            <button className="secondary-button compact-button" type="button" onClick={onClose}>Cancel</button>
+            <button className="primary-button compact-button" type="submit" disabled={saving}>{saving ? "Saving..." : "Update password"}</button>
+          </div>
+        </form>
+      </section>
+    </div>
   );
 }
 
@@ -2947,11 +3727,11 @@ function EventEditorForm({ draft, editorEvent, token, onDraftChange, onSubmit, o
       ) : null}
 
       {activeSection.name === "Floor Plan" ? (
-        editorEvent ? <FloorPlanAdminPage event={editorEvent} token={token} /> : <UnsavedEventSection sectionName="Floor Plan" />
+        editorEvent ? <FloorPlanAdminPage event={editorEvent} token={token} activeSubsection={activeSubsection.name} /> : <UnsavedEventSection sectionName="Floor Plan" />
       ) : null}
 
       {activeSection.name === "Setup" ? (
-        editorEvent ? <EventSetupPage event={editorEvent} /> : <UnsavedEventSection sectionName="Setup" />
+        editorEvent ? <EventSetupPage event={editorEvent} token={token} activeSubsection={activeSubsection.name} /> : <UnsavedEventSection sectionName="Setup" />
       ) : null}
     </div>
   );

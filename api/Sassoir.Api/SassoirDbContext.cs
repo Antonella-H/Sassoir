@@ -89,6 +89,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.Code).HasColumnName("code");
             entity.Property(item => item.Shape).HasColumnName("shape");
             entity.Property(item => item.Capacity).HasColumnName("capacity");
+            entity.Property(item => item.Notes).HasColumnName("notes");
             entity.Property(item => item.ZoneName).HasColumnName("zone_name");
             entity.Property(item => item.CreatedAt).HasColumnName("created_at");
             entity.Property(item => item.UpdatedAt).HasColumnName("updated_at");
@@ -172,6 +173,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.GuestId).HasColumnName("guest_id");
             entity.Property(item => item.Message).HasColumnName("message");
             entity.Property(item => item.CreatedAt).HasColumnName("created_at");
+            entity.HasOne(item => item.Guest).WithMany().HasForeignKey(item => item.GuestId);
         });
 
         modelBuilder.Entity<SearchMetricEntity>(entity =>
@@ -284,6 +286,7 @@ public sealed class EventTableEntity
     public string Code { get; set; } = string.Empty;
     public string Shape { get; set; } = "Round";
     public int Capacity { get; set; }
+    public string? Notes { get; set; }
     public string? ZoneName { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -363,6 +366,7 @@ public sealed class GuestMessageEntity
     public Guid GuestId { get; set; }
     public string Message { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
+    public GuestEntity? Guest { get; set; }
 }
 
 public sealed class SearchMetricEntity

@@ -58,6 +58,7 @@ create table event_tables (
   code text not null,
   shape text not null default 'Round',
   capacity integer not null check (capacity > 0),
+  notes text,
   zone_name text,
   floor_plan_x numeric(8, 6),
   floor_plan_y numeric(8, 6),
