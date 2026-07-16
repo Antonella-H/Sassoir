@@ -29,7 +29,7 @@ Set these environment variables on the API service:
 
 ```text
 ASPNETCORE_ENVIRONMENT=Production
-ConnectionStrings__DefaultConnection=Host=dpg-d9ca2i61a83c73c3i270-a.ohio-postgres.render.com;Database=sassoir;Username=sassoir;Password=YOUR_RENDER_POSTGRES_PASSWORD;SSL Mode=Require;Trust Server Certificate=true
+ConnectionStrings__DefaultConnection=YOUR_RENDER_POSTGRES_EXTERNAL_DATABASE_URL
 Auth__Issuer=sassoir
 Auth__Audience=sassoir.admin
 Auth__SigningKey=GENERATE_A_RANDOM_SECRET_AT_LEAST_32_CHARACTERS
