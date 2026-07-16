@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(TEMP)\sassoir-event-platform\obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(TEMP)\sassoir-event-platform\obj\</MSBuildProjectExtensionsPath>
+    <BaseOutputPath>$(TEMP)\sassoir-event-platform\bin\</BaseOutputPath>
+  </PropertyGroup>
+</Project>
