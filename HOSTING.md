@@ -17,12 +17,12 @@ api.sassoir.com  -> API
 
 ## API Service
 
-Create a Render Web Service for the API.
+Create a Render Web Service for the API. Choose `Docker` when Render asks for the language/runtime.
 
 ```text
+Language: Docker
 Root directory: api
-Build command: dotnet publish Sassoir.Api/Sassoir.Api.csproj -c Release -o out
-Start command: dotnet out/Sassoir.Api.dll
+Dockerfile path: ./Sassoir.Api/Dockerfile
 ```
 
 Set these environment variables on the API service:
