@@ -114,6 +114,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.Email).HasColumnName("email");
             entity.Property(item => item.Phone).HasColumnName("phone");
             entity.Property(item => item.Notes).HasColumnName("notes");
+            entity.Property(item => item.PersonCount).HasColumnName("person_count");
             entity.Property(item => item.Status).HasColumnName("status").HasConversion<string>();
             entity.Property(item => item.CreatedAt).HasColumnName("created_at");
             entity.Property(item => item.UpdatedAt).HasColumnName("updated_at");
@@ -311,6 +312,7 @@ public sealed class GuestEntity
     public string? Email { get; set; }
     public string? Phone { get; set; }
     public string? Notes { get; set; }
+    public int PersonCount { get; set; } = 1;
     public GuestStatus Status { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

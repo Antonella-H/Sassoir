@@ -86,6 +86,7 @@ create table guests (
   email text,
   phone text,
   notes text,
+  person_count integer not null default 1,
   status text not null default 'Active',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()

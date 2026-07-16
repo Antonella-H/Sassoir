@@ -151,15 +151,20 @@ app.MapPost("/api/admin/uploads/event-image", async (HttpRequest request, AuthSt
     var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".webp", ".gif" };
     if (!allowedExtensions.Contains(extension)) return Results.BadRequest(new { message = "Use a JPG, PNG, WebP, or GIF image." });
 
-    var fileName = $"{Guid.NewGuid():N}{extension}";
-    var eventUploadRoot = Path.Combine(uploadRoot, "events");
-    Directory.CreateDirectory(eventUploadRoot);
-    var filePath = Path.Combine(eventUploadRoot, fileName);
+    var contentType = extension switch
+    {
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".png" => "image/png",
+        ".webp" => "image/webp",
+        ".gif" => "image/gif",
+        _ => file.ContentType
+    };
 
-    await using var stream = File.Create(filePath);
-    await file.CopyToAsync(stream);
+    await using var memory = new MemoryStream();
+    await file.CopyToAsync(memory);
+    var dataUrl = $"data:{contentType};base64,{Convert.ToBase64String(memory.ToArray())}";
 
-    return Results.Ok(new UploadResponse($"/api/uploads/events/{fileName}"));
+    return Results.Ok(new UploadResponse(dataUrl));
 }).DisableAntiforgery();
 
 app.MapGet("/api/public/events/{slug}", (string slug, EventStore store) =>
@@ -594,6 +599,7 @@ namespace Sassoir.Api.Data
                   email text,
                   phone text,
                   notes text,
+                  person_count integer not null default 1,
                   status text not null default 'Active',
                   created_at timestamptz not null default now(),
                   updated_at timestamptz not null default now()
@@ -1013,7 +1019,7 @@ namespace Sassoir.Api.Data
         {
             if (!_db.Events.Any(item => item.Id == eventId)) return (null, "not-found");
 
-            var guest = BuildGuest(eventId, request.FirstName, request.LastName, request.DisplayName, request.Notes);
+            var guest = BuildGuest(eventId, request.FirstName, request.LastName, request.DisplayName, request.Notes, request.PersonCount);
             if (string.IsNullOrWhiteSpace(guest.DisplayName)) return (null, "Display name is required.");
 
             _db.Guests.Add(guest);
@@ -1037,8 +1043,9 @@ namespace Sassoir.Api.Data
                 table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == request.TableId && item.EventId == eventId);
                 if (table is null) return (null, "not-found");
 
-                var assignedCount = table.Guests.Count(item => item.Id != guestId && CountsTowardSeating(item.Status));
-                if (assignedCount >= table.Capacity)
+                var assignedCount = CountSeatedPeople(table.Guests.Where(item => item.Id != guestId));
+                var requestedPeople = CountsTowardSeating(request.Status) ? NormalizePersonCount(request.PersonCount) : 0;
+                if (assignedCount + requestedPeople > table.Capacity)
                 {
                     return (null, $"Table {table.Code} is full.");
                 }
@@ -1049,6 +1056,7 @@ namespace Sassoir.Api.Data
             guest.DisplayName = displayName;
             guest.NormalizedSearchName = SearchNormalizer.Normalize(displayName);
             guest.Notes = request.Notes?.Trim();
+            guest.PersonCount = NormalizePersonCount(request.PersonCount);
             guest.TableId = request.Status == GuestStatus.Archived ? null : request.TableId;
             guest.Status = request.Status;
             guest.UpdatedAt = DateTimeOffset.UtcNow;
@@ -1093,8 +1101,9 @@ namespace Sassoir.Api.Data
                 table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
                 if (table is null) return (null, "not-found");
 
-                var assignedCount = table.Guests.Count(item => item.Id != guestId && CountsTowardSeating(item.Status));
-                if (assignedCount >= table.Capacity)
+                var assignedCount = CountSeatedPeople(table.Guests.Where(item => item.Id != guestId));
+                var guestPeople = CountsTowardSeating(guest.Status) ? Math.Max(1, guest.PersonCount) : 0;
+                if (assignedCount + guestPeople > table.Capacity)
                 {
                     return (null, $"Table {table.Code} is full.");
                 }
@@ -1115,30 +1124,26 @@ namespace Sassoir.Api.Data
             var uniqueGuestIds = guestIds.Distinct().ToArray();
             if (uniqueGuestIds.Length == 0) return ([], null);
 
-            EventTableEntity? table = null;
-            if (tableId is not null)
-            {
-                table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
-                if (table is null) return (null, "not-found");
-
-                var incomingAssigned = _db.Guests.Count(item =>
-                    item.EventId == eventId &&
-                    uniqueGuestIds.Contains(item.Id) &&
-                    item.TableId != tableId &&
-                    (item.Status == GuestStatus.Active || item.Status == GuestStatus.CheckedIn));
-                var currentlyAssigned = table.Guests.Count(item => !uniqueGuestIds.Contains(item.Id) && CountsTowardSeating(item.Status));
-                if (currentlyAssigned + incomingAssigned > table.Capacity)
-                {
-                    return (null, $"Table {table.Code} does not have enough open seats.");
-                }
-            }
-
             var guests = _db.Guests
                 .Include(item => item.Table)
                 .Where(item => item.EventId == eventId && uniqueGuestIds.Contains(item.Id))
                 .ToArray();
             if (guests.Length != uniqueGuestIds.Length) return (null, "not-found");
             if (guests.Any(item => item.Status == GuestStatus.Archived)) return (null, "Archived guests cannot be assigned to tables.");
+
+            EventTableEntity? table = null;
+            if (tableId is not null)
+            {
+                table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
+                if (table is null) return (null, "not-found");
+
+                var incomingAssigned = CountSeatedPeople(guests.Where(item => item.TableId != tableId));
+                var currentlyAssigned = CountSeatedPeople(table.Guests.Where(item => !uniqueGuestIds.Contains(item.Id)));
+                if (currentlyAssigned + incomingAssigned > table.Capacity)
+                {
+                    return (null, $"Table {table.Code} does not have enough open seats.");
+                }
+            }
 
             foreach (var guest in guests)
             {
@@ -1183,7 +1188,7 @@ namespace Sassoir.Api.Data
 
             var guests = preview.Preview.Rows
                 .Where(item => !item.IsDuplicate)
-                .Select(item => BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes))
+                .Select(item => BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes, item.PersonCount))
                 .ToArray();
 
             _db.Guests.AddRange(guests);
@@ -1197,13 +1202,14 @@ namespace Sassoir.Api.Data
 
             var guests = GetAdminGuests(eventId);
             var builder = new StringBuilder();
-            builder.AppendLine("First Name,Last Name,Display Name,Notes,Status,Table Number,Table Name");
+            builder.AppendLine("First Name,Last Name,Display Name,Person Count,Notes,Status,Table Number,Table Name");
             foreach (var guest in guests)
             {
                 builder.AppendLine(string.Join(',', [
                     Csv(guest.FirstName),
                     Csv(guest.LastName),
                     Csv(guest.DisplayName),
+                    Csv(guest.PersonCount.ToString(CultureInfo.InvariantCulture)),
                     Csv(guest.Notes),
                     Csv(guest.Status.ToString()),
                     Csv(guest.TableCode),
@@ -1285,16 +1291,18 @@ namespace Sassoir.Api.Data
             }
 
             var capacity = Math.Max(1, request.MaximumCapacity);
-            var assignedCount = table.Guests.Count(item => CountsTowardSeating(item.Status));
+            var assignedCount = CountSeatedPeople(table.Guests);
             if (capacity < assignedCount)
             {
-                return (null, $"Capacity cannot be below the assigned guest count ({assignedCount}).");
+                return (null, $"Capacity cannot be below the assigned person count ({assignedCount}).");
             }
 
+            var nextShape = NormalizeTableShape(request.Shape);
+            var shapeChanged = !string.Equals(NormalizeTableShape(table.Shape), nextShape, StringComparison.OrdinalIgnoreCase);
             table.Name = request.Name.Trim();
             table.Code = number;
             table.Capacity = capacity;
-            table.Shape = NormalizeTableShape(request.Shape);
+            table.Shape = nextShape;
             table.Notes = request.Notes?.Trim();
             table.UpdatedAt = DateTimeOffset.UtcNow;
 
@@ -1303,8 +1311,8 @@ namespace Sassoir.Api.Data
             {
                 floorObject.Label = string.IsNullOrWhiteSpace(table.Name) ? $"Table {number}" : table.Name;
                 floorObject.Shape = ToFloorShape(table.Shape);
-                floorObject.Width = request.Width is null ? floorObject.Width : Math.Clamp(request.Width.Value, 0.04m, 1m);
-                floorObject.Height = request.Height is null ? floorObject.Height : Math.Clamp(request.Height.Value, 0.04m, 1m);
+                floorObject.Width = shapeChanged ? ShapeDefaultWidth(table.Shape) : request.Width is null ? floorObject.Width : Math.Clamp(request.Width.Value, 0.04m, 1m);
+                floorObject.Height = shapeChanged ? ShapeDefaultHeight(table.Shape) : request.Height is null ? floorObject.Height : Math.Clamp(request.Height.Value, 0.04m, 1m);
             }
 
             _db.SaveChanges();
@@ -1447,6 +1455,7 @@ namespace Sassoir.Api.Data
                   add column if not exists first_name text not null default '',
                   add column if not exists last_name text not null default '',
                   add column if not exists notes text,
+                  add column if not exists person_count integer not null default 1,
                   add column if not exists status text not null default 'Active';
 
                 alter table event_tables
@@ -1600,7 +1609,7 @@ namespace Sassoir.Api.Data
             return floorPlan;
         }
 
-        private GuestEntity BuildGuest(Guid eventId, string? firstNameValue, string? lastNameValue, string? displayNameValue, string? notesValue)
+        private GuestEntity BuildGuest(Guid eventId, string? firstNameValue, string? lastNameValue, string? displayNameValue, string? notesValue, int? personCountValue)
         {
             var firstName = firstNameValue?.Trim() ?? string.Empty;
             var lastName = lastNameValue?.Trim() ?? string.Empty;
@@ -1616,6 +1625,7 @@ namespace Sassoir.Api.Data
                 NormalizedSearchName = SearchNormalizer.Normalize(displayName),
                 PublicToken = BuildGuestToken(displayName),
                 Notes = notesValue?.Trim(),
+                PersonCount = NormalizePersonCount(personCountValue),
                 Status = GuestStatus.Active,
                 CreatedAt = DateTimeOffset.UtcNow,
                 UpdatedAt = DateTimeOffset.UtcNow
@@ -1648,6 +1658,7 @@ namespace Sassoir.Api.Data
             var lastName = row.LastName?.Trim() ?? string.Empty;
             var displayName = BuildDisplayName(firstName, lastName, row.DisplayName);
             var notes = row.Notes?.Trim() ?? string.Empty;
+            var personCount = NormalizePersonCount(row.PersonCount);
             var errors = new List<string>();
 
             if (string.IsNullOrWhiteSpace(displayName))
@@ -1670,7 +1681,7 @@ namespace Sassoir.Api.Data
                 errors.Add("Possible duplicate guest.");
             }
 
-            return new AdminGuestImportRowDto(row.RowNumber ?? fallbackRowNumber, firstName, lastName, displayName, notes, isDuplicate, errors.ToArray());
+            return new AdminGuestImportRowDto(row.RowNumber ?? fallbackRowNumber, firstName, lastName, displayName, notes, personCount, isDuplicate, errors.ToArray());
         }
 
         private static string DuplicateKey(GuestEntity guest)
@@ -1686,6 +1697,7 @@ namespace Sassoir.Api.Data
                 guest.LastName,
                 guest.DisplayName,
                 guest.Notes ?? string.Empty,
+                Math.Max(1, guest.PersonCount),
                 guest.TableId,
                 guest.Table?.Code ?? string.Empty,
                 guest.Table?.Name ?? string.Empty,
@@ -1700,9 +1712,21 @@ namespace Sassoir.Api.Data
                 table.Name,
                 table.Code,
                 table.Capacity,
-                table.Guests.Count(guest => CountsTowardSeating(guest.Status)),
+                CountSeatedPeople(table.Guests),
                 NormalizeTableShape(table.Shape),
                 table.Notes ?? string.Empty);
+        }
+
+        private static int CountSeatedPeople(IEnumerable<GuestEntity> guests)
+        {
+            return guests
+                .Where(guest => CountsTowardSeating(guest.Status))
+                .Sum(guest => Math.Max(1, guest.PersonCount));
+        }
+
+        private static int NormalizePersonCount(int? value)
+        {
+            return Math.Max(1, value ?? 1);
         }
 
         private static bool CountsTowardSeating(GuestStatus status)
@@ -2273,23 +2297,24 @@ namespace Sassoir.Api.Models
         string LastName,
         string DisplayName,
         string Notes,
+        int PersonCount,
         Guid? TableId,
         string TableCode,
         string TableName,
         GuestStatus Status,
         bool IsDuplicate);
 
-    public sealed record AdminGuestCreateRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes);
+    public sealed record AdminGuestCreateRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount);
 
-    public sealed record AdminGuestUpsertRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, Guid? TableId, GuestStatus Status);
+    public sealed record AdminGuestUpsertRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount, Guid? TableId, GuestStatus Status);
 
     public sealed record AdminGuestImportRequest(IReadOnlyList<AdminGuestImportRow> Guests);
 
-    public sealed record AdminGuestImportRow(int? RowNumber, string? FirstName, string? LastName, string? DisplayName, string? Notes);
+    public sealed record AdminGuestImportRow(int? RowNumber, string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount);
 
     public sealed record AdminGuestImportPreviewDto(AdminGuestImportRowDto[] Rows, int ErrorCount, int DuplicateCount);
 
-    public sealed record AdminGuestImportRowDto(int RowNumber, string FirstName, string LastName, string DisplayName, string Notes, bool IsDuplicate, string[] Errors);
+    public sealed record AdminGuestImportRowDto(int RowNumber, string FirstName, string LastName, string DisplayName, string Notes, int PersonCount, bool IsDuplicate, string[] Errors);
 
     public sealed record AssignGuestTableRequest(Guid? TableId);
 

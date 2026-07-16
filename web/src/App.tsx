@@ -86,6 +86,7 @@ type AdminGuest = {
   lastName: string;
   displayName: string;
   notes: string;
+  personCount: number;
   tableId?: string | null;
   tableCode: string;
   tableName: string;
@@ -117,6 +118,23 @@ type AdminGuestMessage = {
   message: string;
   createdAt: string;
 };
+
+type GuestListCacheEntry = {
+  guests: AdminGuest[];
+  tables: AdminTable[];
+};
+
+type FloorPlanCacheEntry = GuestListCacheEntry & {
+  floorObjects: FloorObject[];
+};
+
+const guestListCache = new globalThis.Map<string, GuestListCacheEntry>();
+const floorPlanCache = new globalThis.Map<string, FloorPlanCacheEntry>();
+
+function clearEventAdminCaches(eventId: string) {
+  guestListCache.delete(eventId);
+  floorPlanCache.delete(eventId);
+}
 
 type PublicEvent = {
   name: string;
@@ -201,6 +219,7 @@ type AdminGuestDraft = {
   lastName: string;
   displayName: string;
   notes: string;
+  personCount: number;
   tableId: string;
   status: AdminGuest["status"];
 };
@@ -211,6 +230,7 @@ type ImportPreviewRow = {
   lastName: string;
   displayName: string;
   notes: string;
+  personCount: number;
   isDuplicate: boolean;
   errors: string[];
 };
@@ -489,8 +509,22 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
   const merged = [...objects];
 
   tables.forEach((table, index) => {
-    const existing = merged.some((object) => object.linkedTableId === table.id || (object.type === "table" && object.tableCode === table.number));
-    if (existing) return;
+    const existingIndex = merged.findIndex((object) => object.linkedTableId === table.id || (object.type === "table" && object.tableCode === table.number));
+    if (existingIndex >= 0) {
+      const existing = merged[existingIndex];
+      const shapeChanged = existing.shape !== table.shape;
+      merged[existingIndex] = {
+        ...existing,
+        label: table.name || `Table ${table.number}`,
+        linkedTableId: table.id,
+        tableCode: table.number,
+        tableName: table.name,
+        shape: table.shape,
+        width: shapeChanged ? tableShapeDefaultWidth(table.shape) : existing.width,
+        height: shapeChanged ? tableShapeDefaultHeight(table.shape) : existing.height,
+      };
+      return;
+    }
 
     merged.push({
       id: `table-${table.id}`,
@@ -501,14 +535,22 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
       tableName: table.name,
       x: 0.12 + (index % 4) * 0.18,
       y: 0.24 + Math.floor(index / 4) * 0.18,
-      width: table.shape === "rectangle" ? 0.18 : 0.14,
-      height: table.shape === "rectangle" ? 0.11 : 0.14,
+      width: tableShapeDefaultWidth(table.shape),
+      height: tableShapeDefaultHeight(table.shape),
       shape: table.shape,
       zIndex: 5 + index,
     });
   });
 
   return merged;
+}
+
+function tableShapeDefaultWidth(shape: AdminTable["shape"]) {
+  return shape === "rectangle" ? 0.18 : 0.14;
+}
+
+function tableShapeDefaultHeight(shape: AdminTable["shape"]) {
+  return shape === "rectangle" ? 0.11 : 0.14;
 }
 
 function floorObjectsForSave(objects: FloorObject[]) {
@@ -1917,8 +1959,15 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const [showBulkAssignDialog, setShowBulkAssignDialog] = useState(false);
   const [guestPage, setGuestPage] = useState(1);
 
-  const loadGuests = useCallback(async () => {
+  const loadGuests = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
+
+    const cached = guestListCache.get(event.id);
+    if (cached && !options?.force) {
+      setGuests(cached.guests);
+      setTables(cached.tables);
+      return;
+    }
 
     setLoading(true);
     setError("");
@@ -1932,8 +1981,12 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       if (!guestResponse.ok) throw new Error(await readError(guestResponse));
       if (!tableResponse.ok) throw new Error(await readError(tableResponse));
 
-      setGuests((await guestResponse.json()) as AdminGuest[]);
-      setTables((await tableResponse.json()) as AdminTable[]);
+      const guestPayload = (await guestResponse.json()) as AdminGuest[];
+      const tablePayload = (await tableResponse.json()) as AdminTable[];
+
+      setGuests(guestPayload);
+      setTables(tablePayload);
+      guestListCache.set(event.id, { guests: guestPayload, tables: tablePayload });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load guests.");
     } finally {
@@ -1977,7 +2030,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   function downloadGuestTemplate() {
     downloadTextFile(
       "sassoir-guest-import-template.csv",
-      "First Name,Last Name,Display Name,Notes\nAntonella,Hitti,,Vegetarian meal\nKarim,Saab,Karim Saab,Needs aisle access\n",
+      "First Name,Last Name,Display Name,Person Count,Notes\nAntonella,Hitti,,2,Vegetarian meal\nKarim,Saab,Karim Saab,1,Needs aisle access\n",
       "text/csv",
     );
   }
@@ -2010,7 +2063,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       setSelectedGuestId("");
       setFormMode("closed");
       setMessage(editing ? "Guest updated." : "Guest created.");
-      await loadGuests();
+      clearEventAdminCaches(event.id);
+      await loadGuests({ force: true });
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save guest.");
     } finally {
@@ -2032,7 +2086,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       });
       if (!response.ok) throw new Error(await readError(response));
       setMessage(`${guest.displayName} archived.`);
-      await loadGuests();
+      clearEventAdminCaches(event.id);
+      await loadGuests({ force: true });
     } catch (archiveError) {
       setError(archiveError instanceof Error ? archiveError.message : "Could not archive guest.");
     } finally {
@@ -2058,7 +2113,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
         setSelectedGuestId("");
         setFormMode("closed");
       }
-      await loadGuests();
+      clearEventAdminCaches(event.id);
+      await loadGuests({ force: true });
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete guest.");
     } finally {
@@ -2131,7 +2187,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       setImportPreview(null);
       setImportRows([]);
       setMessage(`${validRows.length} guests imported.`);
-      await loadGuests();
+      clearEventAdminCaches(event.id);
+      await loadGuests({ force: true });
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : "Could not import guests.");
     } finally {
@@ -2186,7 +2243,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       setSelectedGuestIds([]);
       setBulkTableId("");
       setShowBulkAssignDialog(false);
-      await loadGuests();
+      clearEventAdminCaches(event.id);
+      await loadGuests({ force: true });
     } catch (bulkError) {
       setError(bulkError instanceof Error ? bulkError.message : "Could not bulk assign guests.");
     } finally {
@@ -2210,6 +2268,9 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const pagedGuests = visibleGuests.slice((currentGuestPage - 1) * guestsPerPage, currentGuestPage * guestsPerPage);
   const assignedGuests = seatingGuests.filter((guest) => guest.tableId).length;
   const unassignedGuests = seatingGuests.length - assignedGuests;
+  const activePeople = sumGuestPeople(activeGuests);
+  const assignedPeople = sumGuestPeople(seatingGuests.filter((guest) => guest.tableId));
+  const unassignedPeople = sumGuestPeople(seatingGuests.filter((guest) => !guest.tableId));
   const duplicateGuests = guests.filter((guest) => guest.isDuplicate).length;
   const selectedGuest = guests.find((guest) => guest.id === selectedGuestId);
   const formTitle = formMode === "create" ? "Create new guest" : formMode === "edit" ? "Edit guest" : "Guest details";
@@ -2326,6 +2387,10 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                 <input value={draft.displayName} onChange={(formEvent) => setDraft((current) => ({ ...current, displayName: formEvent.target.value }))} placeholder={buildGuestDisplayName(draft.firstName, draft.lastName) || "Antonella Hitti"} />
               </label>
               <label>
+                Number of persons
+                <input type="number" min="1" value={draft.personCount} onChange={(formEvent) => setDraft((current) => ({ ...current, personCount: normalizePersonCount(Number(formEvent.target.value)) }))} />
+              </label>
+              <label>
                 Status
                 <select value={draft.status} onChange={(formEvent) => setDraft((current) => ({ ...current, status: formEvent.target.value as AdminGuest["status"], tableId: formEvent.target.value === "Archived" ? "" : current.tableId }))}>
                   <option>Active</option>
@@ -2364,6 +2429,9 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
             <span>{activeGuests.length} active</span>
             <span>{assignedGuests} assigned</span>
             <span>{unassignedGuests} unassigned</span>
+            <span>{activePeople} active people</span>
+            <span>{assignedPeople} seated people</span>
+            <span>{unassignedPeople} unseated people</span>
             {duplicateGuests ? <span>{duplicateGuests} duplicate flags</span> : null}
           </div>
         </div>
@@ -2392,6 +2460,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                   <tr>
                     <th>Row</th>
                     <th>Guest</th>
+                    <th>People</th>
                     <th>Notes</th>
                     <th>Review</th>
                   </tr>
@@ -2401,6 +2470,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                     <tr key={`${row.rowNumber}-${row.displayName}`}>
                       <td data-label="Row">{row.rowNumber}</td>
                       <td data-label="Guest"><strong>{row.displayName || "Missing name"}</strong><span>{[row.firstName, row.lastName].filter(Boolean).join(" ") || "No legal name set"}</span></td>
+                      <td data-label="People">{row.personCount}</td>
                       <td data-label="Notes">{row.notes || "-"}</td>
                       <td data-label="Review">{row.errors.length ? <span className="guest-flag error"><FileWarning aria-hidden="true" />{row.errors.join(" ")}</span> : <span className="guest-flag ok"><Check aria-hidden="true" />Ready</span>}</td>
                     </tr>
@@ -2429,6 +2499,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                   />
                 </th>
                 <th>Guest</th>
+                <th>People</th>
                 <th>Status</th>
                 <th>Assigned Table</th>
                 <th>Notes</th>
@@ -2457,6 +2528,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                         <span>{[guest.firstName, guest.lastName].filter(Boolean).join(" ") || "No legal name set"}</span>
                       </button>
                     </td>
+                    <td data-label="People">{normalizePersonCount(guest.personCount)}</td>
                     <td data-label="Status"><span className={`event-status ${guest.status === "Active" ? "published" : ""}`}>{guest.status}</span></td>
                     <td data-label="Assigned Table">{guest.tableCode ? `Table ${guest.tableCode}` : "System: unassigned"}<span>{guest.tableName || (table ? table.name : "")}</span></td>
                     <td data-label="Notes">{guest.notes || "-"}</td>
@@ -2501,6 +2573,7 @@ function emptyGuestDraft(): AdminGuestDraft {
     lastName: "",
     displayName: "",
     notes: "",
+    personCount: 1,
     tableId: "",
     status: "Active",
   };
@@ -2512,9 +2585,18 @@ function guestToDraft(guest: AdminGuest): AdminGuestDraft {
     lastName: guest.lastName ?? "",
     displayName: guest.displayName ?? "",
     notes: guest.notes ?? "",
+    personCount: normalizePersonCount(guest.personCount),
     tableId: guest.tableId ?? "",
     status: guest.status ?? "Active",
   };
+}
+
+function normalizePersonCount(value: number | null | undefined) {
+  return Math.max(1, Math.floor(Number.isFinite(value ?? NaN) ? Number(value) : 1));
+}
+
+function sumGuestPeople(guests: AdminGuest[]) {
+  return guests.reduce((total, guest) => total + normalizePersonCount(guest.personCount), 0);
 }
 
 function parseGuestCsv(text: string) {
@@ -2535,6 +2617,7 @@ function parseGuestCsv(text: string) {
       firstName: value("firstname", "first", "first_name"),
       lastName: value("lastname", "last", "last_name", "surname"),
       displayName: value("displayname", "display", "name", "fullname"),
+      personCount: normalizePersonCount(Number(value("personcount", "people", "persons", "partysize", "party", "numberofpersons", "numberofperson"))),
       notes: value("notes", "note", "comment", "comments"),
     };
   });
@@ -2684,8 +2767,16 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   const [warning, setWarning] = useState("");
   const [tableDraft, setTableDraft] = useState<AdminTableDraft>(emptyTableDraft());
 
-  const loadFloorPlan = useCallback(async () => {
+  const loadFloorPlan = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
+
+    const cached = floorPlanCache.get(event.id);
+    if (cached && !options?.force) {
+      setTables(cached.tables);
+      setGuests(cached.guests);
+      setFloorObjects(cached.floorObjects);
+      return;
+    }
 
     setLoading(true);
     setError("");
@@ -2705,9 +2796,13 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       const guestPayload = (await guestResponse.json()) as AdminGuest[];
       const floorPlanPayload = await floorPlanResponse.json();
 
+      const mergedObjects = withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), tablePayload);
+
       setTables(tablePayload);
       setGuests(guestPayload);
-      setFloorObjects(withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), tablePayload));
+      setFloorObjects(mergedObjects);
+      guestListCache.set(event.id, { guests: guestPayload, tables: tablePayload });
+      floorPlanCache.set(event.id, { tables: tablePayload, guests: guestPayload, floorObjects: mergedObjects });
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load floor plan.");
     } finally {
@@ -2768,7 +2863,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       setTableDraft(emptyTableDraft());
       setEditingTableId("");
       setShowTableForm(false);
-      await loadFloorPlan();
+      clearEventAdminCaches(event.id);
+      await loadFloorPlan({ force: true });
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Could not save table.");
     } finally {
@@ -2793,7 +2889,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
         setEditingTableId("");
         setShowTableForm(false);
       }
-      await loadFloorPlan();
+      clearEventAdminCaches(event.id);
+      await loadFloorPlan({ force: true });
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete table.");
     } finally {
@@ -2840,7 +2937,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       }
 
       setWarning(`${rows.length} tables imported.`);
-      await loadFloorPlan();
+      clearEventAdminCaches(event.id);
+      await loadFloorPlan({ force: true });
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : "Could not import tables.");
     } finally {
@@ -2906,7 +3004,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
 
     const guest = guests.find((item) => item.id === guestId);
     const table = tables.find((item) => item.id === tableId);
-    if (guest?.tableId !== tableId && table && table.assignedGuestCount >= table.maximumCapacity) {
+    const guestPeople = guest?.status === "Active" || guest?.status === "CheckedIn" ? normalizePersonCount(guest.personCount) : 0;
+    if (guest?.tableId !== tableId && table && table.assignedGuestCount + guestPeople > table.maximumCapacity) {
       setWarning(`${table.name || `Table ${table.number}`} is full.`);
       return;
     }
@@ -2926,7 +3025,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       });
 
       if (!response.ok) throw new Error(await readError(response));
-      await loadFloorPlan();
+      clearEventAdminCaches(event.id);
+      await loadFloorPlan({ force: true });
     } catch (assignError) {
       setWarning(assignError instanceof Error ? assignError.message : "Could not assign guest.");
     } finally {
@@ -2953,7 +3053,9 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
 
       if (!response.ok) throw new Error(await readError(response));
       const payload = await response.json();
-      setFloorObjects(withTableFloorObjects(toFloorObjects(payload?.objects), tables));
+      const mergedObjects = withTableFloorObjects(toFloorObjects(payload?.objects), tables);
+      setFloorObjects(mergedObjects);
+      floorPlanCache.set(event.id, { tables, guests, floorObjects: mergedObjects });
       setWarning("Floor plan saved.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save floor plan.");
@@ -2975,12 +3077,13 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       return left.lastName.localeCompare(right.lastName) || left.firstName.localeCompare(right.firstName) || left.displayName.localeCompare(right.displayName);
     });
 
-    const lines = ["First Name,Last Name,Display Name,Table Number,Table Name,Status"];
+    const lines = ["First Name,Last Name,Display Name,Person Count,Table Number,Table Name,Status"];
     sortedGuests.forEach((guest) => {
       lines.push([
         guest.firstName,
         guest.lastName,
         guest.displayName,
+        String(normalizePersonCount(guest.personCount)),
         guest.tableCode || "Unassigned",
         guest.tableName,
         guest.status,
@@ -3075,7 +3178,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
               </label>
               {editingTableId ? (
                 <label>
-                  Assigned Guest Count
+                  Assigned Person Count
                   <input value={tables.find((table) => table.id === editingTableId)?.assignedGuestCount ?? 0} readOnly />
                 </label>
               ) : null}
@@ -3103,7 +3206,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                 <th>Number</th>
                 <th>Shape</th>
                 <th>Maximum Capacity</th>
-                <th>Assigned Guests</th>
+                <th>Assigned Persons</th>
                 <th>Notes</th>
                 <th>Actions</th>
               </tr>
@@ -3115,7 +3218,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                   <td data-label="Number">{table.number}</td>
                   <td data-label="Shape">{tableShapeOptions.find((shape) => shape.value === table.shape)?.label ?? table.shape}</td>
                   <td data-label="Maximum Capacity">{table.maximumCapacity}</td>
-                  <td data-label="Assigned Guests">{table.assignedGuestCount}</td>
+                  <td data-label="Assigned Persons">{table.assignedGuestCount}</td>
                   <td data-label="Notes">{table.notes || "-"}</td>
                   <td className="actions-cell" data-label="Actions">
                     <div className="event-actions">
@@ -3213,7 +3316,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                   onDragStart={(dragEvent) => dragEvent.dataTransfer.setData("guest-id", guest.id)}
                 >
                   <strong>{guest.displayName}</strong>
-                  <span>{guest.tableCode ? `Table ${guest.tableCode}` : "Unassigned"}</span>
+                  <span>{normalizePersonCount(guest.personCount)} {normalizePersonCount(guest.personCount) === 1 ? "person" : "people"} - {guest.tableCode ? `Table ${guest.tableCode}` : "Unassigned"}</span>
                 </button>
               ))}
             </div>
