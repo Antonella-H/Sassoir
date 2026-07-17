@@ -1460,6 +1460,10 @@ namespace Sassoir.Api.Data
             {
                 query = query.Where(item => item.TableId == parsedTableId);
             }
+            else if (string.Equals(tableId, "Unassigned", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(item => item.TableId == null);
+            }
 
             var totalCount = await query.CountAsync(cancellationToken);
             var items = await query

@@ -142,6 +142,13 @@ type FloorPlanCacheEntry = GuestListCacheEntry & {
   floorObjects: FloorObject[];
 };
 
+type PaginatedResponse<T> = {
+  items: T[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+};
+
 type AdminEventCacheEntry = {
   guests?: AdminGuest[];
   tables?: AdminTable[];
@@ -149,44 +156,83 @@ type AdminEventCacheEntry = {
 };
 
 const adminEventCache = new globalThis.Map<string, AdminEventCacheEntry>();
-const adminGuestListRequests = new globalThis.Map<string, Promise<GuestListCacheEntry>>();
+const adminGuestPageCache = new globalThis.Map<string, PaginatedResponse<AdminGuest>>();
+const adminGuestPageRequests = new globalThis.Map<string, Promise<PaginatedResponse<AdminGuest>>>();
+const adminTableRequests = new globalThis.Map<string, Promise<AdminTable[]>>();
 const adminFloorPlanRequests = new globalThis.Map<string, Promise<FloorPlanCacheEntry>>();
 const publicEventCache = new globalThis.Map<string, { event: PublicEvent; floorObjects: FloorObject[] }>();
 const minimumGuestSearchCharacters = 2;
 
 function clearEventAdminCaches(eventId: string) {
   adminEventCache.delete(eventId);
-  adminGuestListRequests.delete(eventId);
+  adminTableRequests.delete(eventId);
   adminFloorPlanRequests.delete(eventId);
+  [...adminGuestPageCache.keys()]
+    .filter((key) => key.startsWith(`${eventId}:`))
+    .forEach((key) => adminGuestPageCache.delete(key));
+  [...adminGuestPageRequests.keys()]
+    .filter((key) => key.startsWith(`${eventId}:`))
+    .forEach((key) => adminGuestPageRequests.delete(key));
 }
 
-async function getAdminGuestList(eventId: string, token: string, options?: { force?: boolean }) {
-  const cached = adminEventCache.get(eventId);
-  if (!options?.force && cached?.guests && cached.tables) {
-    return { guests: cached.guests, tables: cached.tables };
+function adminGuestPageKey(eventId: string, params: { page: number; pageSize: number; search: string; status: string; tableId: string }) {
+  return [eventId, params.page, params.pageSize, params.search, params.status, params.tableId].join(":");
+}
+
+async function getAdminGuestPage(eventId: string, token: string, params: { page: number; pageSize: number; search: string; status: string; tableId: string }, options?: { force?: boolean }) {
+  const cacheKey = adminGuestPageKey(eventId, params);
+  if (!options?.force) {
+    const cached = adminGuestPageCache.get(cacheKey);
+    if (cached) return cached;
+
+    const pending = adminGuestPageRequests.get(cacheKey);
+    if (pending) return pending;
   }
 
-  const requestKey = `${eventId}:${token}`;
-  const pending = adminGuestListRequests.get(requestKey);
-  if (!options?.force && pending) return pending;
+  const searchParams = new URLSearchParams({
+    page: String(params.page),
+    pageSize: String(params.pageSize),
+  });
+  if (params.search) searchParams.set("search", params.search);
+  if (params.status !== "All") searchParams.set("status", params.status);
+  if (params.tableId !== "All") searchParams.set("tableId", params.tableId);
 
-  const request = Promise.all([
-    fetch(apiUrl(`/api/admin/events/${eventId}/guests`), { headers: { Authorization: `Bearer ${token}` } }),
-    fetch(apiUrl(`/api/admin/events/${eventId}/tables`), { headers: { Authorization: `Bearer ${token}` } }),
-  ]).then(async ([guestResponse, tableResponse]) => {
-    if (!guestResponse.ok) throw new Error(await readError(guestResponse));
-    if (!tableResponse.ok) throw new Error(await readError(tableResponse));
-
-    const guests = (await guestResponse.json()) as AdminGuest[];
-    const tables = (await tableResponse.json()) as AdminTable[];
-    const previous = adminEventCache.get(eventId) ?? {};
-    adminEventCache.set(eventId, { ...previous, guests, tables });
-    return { guests, tables };
+  const request = fetch(apiUrl(`/api/admin/events/${eventId}/guests/page?${searchParams.toString()}`), {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(async (response) => {
+    if (!response.ok) throw new Error(await readError(response));
+    const payload = (await response.json()) as PaginatedResponse<AdminGuest>;
+    adminGuestPageCache.set(cacheKey, payload);
+    return payload;
   }).finally(() => {
-    adminGuestListRequests.delete(requestKey);
+    adminGuestPageRequests.delete(cacheKey);
   });
 
-  adminGuestListRequests.set(requestKey, request);
+  adminGuestPageRequests.set(cacheKey, request);
+  return request;
+}
+
+async function getAdminTables(eventId: string, token: string, options?: { force?: boolean }) {
+  const cached = adminEventCache.get(eventId);
+  if (!options?.force && cached?.tables) return cached.tables;
+
+  const requestKey = `${eventId}:${token}`;
+  const pending = adminTableRequests.get(requestKey);
+  if (!options?.force && pending) return pending;
+
+  const request = fetch(apiUrl(`/api/admin/events/${eventId}/tables`), {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(async (response) => {
+    if (!response.ok) throw new Error(await readError(response));
+    const tables = (await response.json()) as AdminTable[];
+    const previous = adminEventCache.get(eventId) ?? {};
+    adminEventCache.set(eventId, { ...previous, tables });
+    return tables;
+  }).finally(() => {
+    adminTableRequests.delete(requestKey);
+  });
+
+  adminTableRequests.set(requestKey, request);
   return request;
 }
 
@@ -201,16 +247,23 @@ async function getAdminFloorPlan(eventId: string, token: string, options?: { for
   if (!options?.force && pending) return pending;
 
   const request = Promise.all([
-    getAdminGuestList(eventId, token, options),
+    getAdminTables(eventId, token, options),
+    getAdminGuestPage(eventId, token, {
+      page: 1,
+      pageSize: 20,
+      search: "",
+      status: "All",
+      tableId: "All",
+    }, options),
     fetch(apiUrl(`/api/admin/events/${eventId}/floor-plan`), { headers: { Authorization: `Bearer ${token}` } }),
-  ]).then(async ([guestList, floorPlanResponse]) => {
+  ]).then(async ([tables, guestPage, floorPlanResponse]) => {
     if (!floorPlanResponse.ok) throw new Error(await readError(floorPlanResponse));
 
     const floorPlanPayload = await floorPlanResponse.json();
-    const floorObjects = withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), guestList.tables);
+    const floorObjects = withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), tables);
     const previous = adminEventCache.get(eventId) ?? {};
-    adminEventCache.set(eventId, { ...previous, guests: guestList.guests, tables: guestList.tables, floorObjects });
-    return { guests: guestList.guests, tables: guestList.tables, floorObjects };
+    adminEventCache.set(eventId, { ...previous, guests: guestPage.items, tables, floorObjects });
+    return { guests: guestPage.items, tables, floorObjects };
   }).finally(() => {
     adminFloorPlanRequests.delete(requestKey);
   });
@@ -2090,7 +2143,9 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const [bulkTableId, setBulkTableId] = useState("");
   const [showBulkAssignDialog, setShowBulkAssignDialog] = useState(false);
   const [guestPage, setGuestPage] = useState(1);
+  const [totalGuestCount, setTotalGuestCount] = useState(0);
   const debouncedQuery = useDebouncedValue(query, 300);
+  const guestsPerPage = 20;
 
   const loadGuests = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
@@ -2099,15 +2154,25 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
     setError("");
 
     try {
-      const payload = await getAdminGuestList(event.id, token, options);
-      setGuests(payload.guests);
-      setTables(payload.tables);
+      const [guestPayload, tablePayload] = await Promise.all([
+        getAdminGuestPage(event.id, token, {
+          page: guestPage,
+          pageSize: guestsPerPage,
+          search: debouncedQuery.trim(),
+          status: statusFilter,
+          tableId: tableFilter,
+        }, options),
+        getAdminTables(event.id, token, options),
+      ]);
+      setGuests(guestPayload.items);
+      setTotalGuestCount(guestPayload.totalCount);
+      setTables(tablePayload);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load guests.");
     } finally {
       setLoading(false);
     }
-  }, [event.id, token]);
+  }, [debouncedQuery, event.id, guestPage, statusFilter, tableFilter, token]);
 
   useEffect(() => {
     void loadGuests();
@@ -2369,18 +2434,9 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
 
   const activeGuests = guests.filter((guest) => guest.status === "Active");
   const seatingGuests = guests.filter((guest) => guest.status === "Active" || guest.status === "CheckedIn");
-  const normalizedQuery = normalizeSearch(debouncedQuery);
-  const visibleGuests = guests.filter((guest) => {
-    const text = normalizeSearch(`${guest.firstName} ${guest.lastName} ${guest.displayName} ${guest.notes} ${guest.tableCode} ${guest.tableName}`);
-    const matchesQuery = !normalizedQuery || text.includes(normalizedQuery);
-    const matchesStatus = statusFilter === "All" || guest.status === statusFilter || (statusFilter === "Unassigned" && !guest.tableId && guest.status !== "Archived");
-    const matchesTable = tableFilter === "All" || (tableFilter === "Unassigned" ? !guest.tableId : guest.tableId === tableFilter);
-    return matchesQuery && matchesStatus && matchesTable;
-  });
-  const guestsPerPage = 20;
-  const totalGuestPages = Math.max(1, Math.ceil(visibleGuests.length / guestsPerPage));
+  const totalGuestPages = Math.max(1, Math.ceil(totalGuestCount / guestsPerPage));
   const currentGuestPage = Math.min(guestPage, totalGuestPages);
-  const pagedGuests = visibleGuests.slice((currentGuestPage - 1) * guestsPerPage, currentGuestPage * guestsPerPage);
+  const pagedGuests = guests;
   const assignedGuests = seatingGuests.filter((guest) => guest.tableId).length;
   const unassignedGuests = seatingGuests.length - assignedGuests;
   const activePeople = sumGuestPeople(activeGuests);
@@ -2392,19 +2448,24 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const canSaveImport = importPreview ? importPreview.rows.some((row) => row.errors.length === 0 && !row.isDuplicate) : false;
   const pageGuestIds = pagedGuests.map((guest) => guest.id);
   const pageSelected = pageGuestIds.length > 0 && pageGuestIds.every((id) => selectedGuestIds.includes(id));
-
-  useEffect(() => {
-    setGuestPage(1);
-  }, [query, statusFilter, tableFilter]);
+  const paginationStart = Math.max(1, currentGuestPage - 2);
+  const paginationEnd = Math.min(totalGuestPages, currentGuestPage + 2);
+  const paginationPages = Array.from({ length: paginationEnd - paginationStart + 1 }, (_, index) => paginationStart + index);
 
   return (
     <section className="guest-manager">
       <div className="list-toolbar guest-toolbar">
         <label className="admin-search">
           <Search aria-hidden="true" />
-          <input value={query} onChange={(formEvent) => setQuery(formEvent.target.value)} placeholder="Search guests" aria-label="Search guests" />
+          <input value={query} onChange={(formEvent) => {
+            setQuery(formEvent.target.value);
+            setGuestPage(1);
+          }} placeholder="Search guests" aria-label="Search guests" />
         </label>
-        <select value={statusFilter} onChange={(formEvent) => setStatusFilter(formEvent.target.value)} aria-label="Filter guests by status">
+        <select value={statusFilter} onChange={(formEvent) => {
+          setStatusFilter(formEvent.target.value);
+          setGuestPage(1);
+        }} aria-label="Filter guests by status">
           <option>Active</option>
           <option>All</option>
           <option>Unassigned</option>
@@ -2412,7 +2473,10 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
           <option>CheckedIn</option>
           <option>Archived</option>
         </select>
-        <select value={tableFilter} onChange={(formEvent) => setTableFilter(formEvent.target.value)} aria-label="Filter guests by table">
+        <select value={tableFilter} onChange={(formEvent) => {
+          setTableFilter(formEvent.target.value);
+          setGuestPage(1);
+        }} aria-label="Filter guests by table">
           <option value="All">All tables</option>
           <option value="Unassigned">Unassigned</option>
           {tables.map((table) => <option key={table.id} value={table.id}>Table {table.number}</option>)}
@@ -2661,16 +2725,22 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
               })}
             </tbody>
           </table>
-          {!loading && visibleGuests.length === 0 ? <p className="empty-state">No guests match this view. Create a guest or adjust the filters.</p> : null}
-          {visibleGuests.length > 0 ? (
+          {!loading && totalGuestCount === 0 ? <p className="empty-state">No guests match this view. Create a guest or adjust the filters.</p> : null}
+          {totalGuestCount > 0 ? (
             <div className="pagination">
-              <span>Showing {(currentGuestPage - 1) * guestsPerPage + 1}-{Math.min(currentGuestPage * guestsPerPage, visibleGuests.length)} of {visibleGuests.length}</span>
+              <span>Showing {(currentGuestPage - 1) * guestsPerPage + 1}-{Math.min(currentGuestPage * guestsPerPage, totalGuestCount)} of {totalGuestCount}</span>
               <div className="page-nums">
-                {Array.from({ length: totalGuestPages }, (_, index) => index + 1).map((pageNumber) => (
+                <button type="button" onClick={() => setGuestPage(Math.max(1, currentGuestPage - 1))} disabled={currentGuestPage === 1}>Prev</button>
+                {paginationStart > 1 ? <button type="button" onClick={() => setGuestPage(1)}>1</button> : null}
+                {paginationStart > 2 ? <span>...</span> : null}
+                {paginationPages.map((pageNumber) => (
                   <button className={pageNumber === currentGuestPage ? "active" : ""} key={pageNumber} type="button" onClick={() => setGuestPage(pageNumber)}>
                     {pageNumber}
                   </button>
                 ))}
+                {paginationEnd < totalGuestPages - 1 ? <span>...</span> : null}
+                {paginationEnd < totalGuestPages ? <button type="button" onClick={() => setGuestPage(totalGuestPages)}>{totalGuestPages}</button> : null}
+                <button type="button" onClick={() => setGuestPage(Math.min(totalGuestPages, currentGuestPage + 1))} disabled={currentGuestPage === totalGuestPages}>Next</button>
               </div>
             </div>
           ) : null}
