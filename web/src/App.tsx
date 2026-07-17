@@ -158,6 +158,8 @@ type AdminEventCacheEntry = {
 const adminEventCache = new globalThis.Map<string, AdminEventCacheEntry>();
 const adminGuestPageCache = new globalThis.Map<string, PaginatedResponse<AdminGuest>>();
 const adminGuestPageRequests = new globalThis.Map<string, Promise<PaginatedResponse<AdminGuest>>>();
+const adminTablePageCache = new globalThis.Map<string, PaginatedResponse<AdminTable>>();
+const adminTablePageRequests = new globalThis.Map<string, Promise<PaginatedResponse<AdminTable>>>();
 const adminTableRequests = new globalThis.Map<string, Promise<AdminTable[]>>();
 const adminFloorPlanRequests = new globalThis.Map<string, Promise<FloorPlanCacheEntry>>();
 const publicEventCache = new globalThis.Map<string, { event: PublicEvent; floorObjects: FloorObject[] }>();
@@ -173,6 +175,12 @@ function clearEventAdminCaches(eventId: string) {
   [...adminGuestPageRequests.keys()]
     .filter((key) => key.startsWith(`${eventId}:`))
     .forEach((key) => adminGuestPageRequests.delete(key));
+  [...adminTablePageCache.keys()]
+    .filter((key) => key.startsWith(`${eventId}:`))
+    .forEach((key) => adminTablePageCache.delete(key));
+  [...adminTablePageRequests.keys()]
+    .filter((key) => key.startsWith(`${eventId}:`))
+    .forEach((key) => adminTablePageRequests.delete(key));
 }
 
 function adminGuestPageKey(eventId: string, params: { page: number; pageSize: number; search: string; status: string; tableId: string }) {
@@ -233,6 +241,41 @@ async function getAdminTables(eventId: string, token: string, options?: { force?
   });
 
   adminTableRequests.set(requestKey, request);
+  return request;
+}
+
+function adminTablePageKey(eventId: string, params: { page: number; pageSize: number; search: string }) {
+  return [eventId, params.page, params.pageSize, params.search].join(":");
+}
+
+async function getAdminTablePage(eventId: string, token: string, params: { page: number; pageSize: number; search: string }, options?: { force?: boolean }) {
+  const cacheKey = adminTablePageKey(eventId, params);
+  if (!options?.force) {
+    const cached = adminTablePageCache.get(cacheKey);
+    if (cached) return cached;
+
+    const pending = adminTablePageRequests.get(cacheKey);
+    if (pending) return pending;
+  }
+
+  const searchParams = new URLSearchParams({
+    page: String(params.page),
+    pageSize: String(params.pageSize),
+  });
+  if (params.search) searchParams.set("search", params.search);
+
+  const request = fetch(apiUrl(`/api/admin/events/${eventId}/tables/page?${searchParams.toString()}`), {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(async (response) => {
+    if (!response.ok) throw new Error(await readError(response));
+    const payload = (await response.json()) as PaginatedResponse<AdminTable>;
+    adminTablePageCache.set(cacheKey, payload);
+    return payload;
+  }).finally(() => {
+    adminTablePageRequests.delete(cacheKey);
+  });
+
+  adminTablePageRequests.set(cacheKey, request);
   return request;
 }
 
@@ -2951,6 +2994,32 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [tableDraft, setTableDraft] = useState<AdminTableDraft>(emptyTableDraft());
+  const [tableQuery, setTableQuery] = useState("");
+  const [tablePage, setTablePage] = useState(1);
+  const [totalTableCount, setTotalTableCount] = useState(0);
+  const debouncedTableQuery = useDebouncedValue(tableQuery, 300);
+  const tablesPerPage = 20;
+
+  const loadTables = useCallback(async (options?: { force?: boolean }) => {
+    if (!token) return;
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const payload = await getAdminTablePage(event.id, token, {
+        page: tablePage,
+        pageSize: tablesPerPage,
+        search: debouncedTableQuery.trim(),
+      }, options);
+      setTables(payload.items);
+      setTotalTableCount(payload.totalCount);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not load tables.");
+    } finally {
+      setLoading(false);
+    }
+  }, [debouncedTableQuery, event.id, tablePage, token]);
 
   const loadFloorPlan = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
@@ -2971,8 +3040,15 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   }, [event.id, token]);
 
   useEffect(() => {
-    void loadFloorPlan();
-  }, [loadFloorPlan]);
+    if (activeSubsection === "Tables") {
+      void loadTables();
+      return;
+    }
+
+    if (activeSubsection === "Design") {
+      void loadFloorPlan();
+    }
+  }, [activeSubsection, loadFloorPlan, loadTables]);
 
   function startCreateTable() {
     setEditingTableId("");
@@ -3024,7 +3100,11 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       setEditingTableId("");
       setShowTableForm(false);
       clearEventAdminCaches(event.id);
-      await loadFloorPlan({ force: true });
+      if (activeSubsection === "Tables") {
+        await loadTables({ force: true });
+      } else {
+        await loadFloorPlan({ force: true });
+      }
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Could not save table.");
     } finally {
@@ -3050,7 +3130,11 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
         setShowTableForm(false);
       }
       clearEventAdminCaches(event.id);
-      await loadFloorPlan({ force: true });
+      if (activeSubsection === "Tables") {
+        await loadTables({ force: true });
+      } else {
+        await loadFloorPlan({ force: true });
+      }
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Could not delete table.");
     } finally {
@@ -3098,7 +3182,11 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
 
       setWarning(`${rows.length} tables imported.`);
       clearEventAdminCaches(event.id);
-      await loadFloorPlan({ force: true });
+      if (activeSubsection === "Tables") {
+        await loadTables({ force: true });
+      } else {
+        await loadFloorPlan({ force: true });
+      }
     } catch (importError) {
       setError(importError instanceof Error ? importError.message : "Could not import tables.");
     } finally {
@@ -3294,6 +3382,12 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
     link.click();
   }
 
+  const totalTablePages = Math.max(1, Math.ceil(totalTableCount / tablesPerPage));
+  const currentTablePage = Math.min(tablePage, totalTablePages);
+  const tablePaginationStart = Math.max(1, currentTablePage - 2);
+  const tablePaginationEnd = Math.min(totalTablePages, currentTablePage + 2);
+  const tablePaginationPages = Array.from({ length: tablePaginationEnd - tablePaginationStart + 1 }, (_, index) => tablePaginationStart + index);
+
   return (
     <>
       {activeSubsection === "Tables" ? (
@@ -3319,6 +3413,16 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
         </div>
 
         {error ? <p className="form-error">{error}</p> : null}
+
+        <div className="list-toolbar">
+          <label className="admin-search">
+            <Search aria-hidden="true" />
+            <input value={tableQuery} onChange={(formEvent) => {
+              setTableQuery(formEvent.target.value);
+              setTablePage(1);
+            }} placeholder="Search tables" aria-label="Search tables" />
+          </label>
+        </div>
 
         {showTableForm ? (
           <form className="event-form" onSubmit={saveTable}>
@@ -3395,7 +3499,25 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
               ))}
             </tbody>
           </table>
-          {!loading && tables.length === 0 ? <p className="empty-state">No tables yet. Add tables before designing the floor plan.</p> : null}
+          {!loading && totalTableCount === 0 ? <p className="empty-state">No tables yet. Add tables before designing the floor plan.</p> : null}
+          {totalTableCount > 0 ? (
+            <div className="pagination">
+              <span>Showing {(currentTablePage - 1) * tablesPerPage + 1}-{Math.min(currentTablePage * tablesPerPage, totalTableCount)} of {totalTableCount}</span>
+              <div className="page-nums">
+                <button type="button" onClick={() => setTablePage(Math.max(1, currentTablePage - 1))} disabled={currentTablePage === 1}>Prev</button>
+                {tablePaginationStart > 1 ? <button type="button" onClick={() => setTablePage(1)}>1</button> : null}
+                {tablePaginationStart > 2 ? <span>...</span> : null}
+                {tablePaginationPages.map((pageNumber) => (
+                  <button className={pageNumber === currentTablePage ? "active" : ""} key={pageNumber} type="button" onClick={() => setTablePage(pageNumber)}>
+                    {pageNumber}
+                  </button>
+                ))}
+                {tablePaginationEnd < totalTablePages - 1 ? <span>...</span> : null}
+                {tablePaginationEnd < totalTablePages ? <button type="button" onClick={() => setTablePage(totalTablePages)}>{totalTablePages}</button> : null}
+                <button type="button" onClick={() => setTablePage(Math.min(totalTablePages, currentTablePage + 1))} disabled={currentTablePage === totalTablePages}>Next</button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </section>
       ) : null}
