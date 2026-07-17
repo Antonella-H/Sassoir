@@ -228,11 +228,12 @@ async function getAdminTables(eventId: string, token: string, options?: { force?
   const pending = adminTableRequests.get(requestKey);
   if (!options?.force && pending) return pending;
 
-  const request = fetch(apiUrl(`/api/admin/events/${eventId}/tables`), {
+  const request = fetch(apiUrl(`/api/admin/events/${eventId}/tables/page?page=1&pageSize=100`), {
     headers: { Authorization: `Bearer ${token}` },
   }).then(async (response) => {
     if (!response.ok) throw new Error(await readError(response));
-    const tables = (await response.json()) as AdminTable[];
+    const payload = (await response.json()) as PaginatedResponse<AdminTable>;
+    const tables = payload.items;
     const previous = adminEventCache.get(eventId) ?? {};
     adminEventCache.set(eventId, { ...previous, tables });
     return tables;

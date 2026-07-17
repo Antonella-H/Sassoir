@@ -1697,10 +1697,20 @@ namespace Sassoir.Api.Data
         {
             return _db.EventTables
                 .AsNoTracking()
-                .Include(item => item.Guests)
                 .Where(item => item.EventId == eventId)
                 .OrderBy(item => item.Code)
-                .Select(item => ToAdminTableDto(item))
+                .Select(item => new AdminTableDto(
+                    item.Id,
+                    item.Name,
+                    item.Code,
+                    item.Capacity,
+                    item.Guests
+                        .Where(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
+                        .Sum(guest => guest.PersonCount < 1 ? 1 : guest.PersonCount),
+                    item.Shape.ToLower() == "square" ? "square" :
+                        item.Shape.ToLower() == "rectangle" ? "rectangle" :
+                        item.Shape.ToLower() == "tear" ? "tear" : "round",
+                    item.Notes ?? string.Empty))
                 .ToArray();
         }
 
