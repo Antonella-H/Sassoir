@@ -186,6 +186,7 @@ create index ix_guest_aliases_normalized_alias_trgm on guest_search_aliases usin
 create index ix_event_tables_event on event_tables(event_id);
 create index ix_floor_plans_event_active on floor_plans(event_id, is_active);
 create index ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
+create index ix_floor_plan_objects_floor_plan_visible_z on floor_plan_objects(floor_plan_id, is_visible, z_index);
 create index ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
 create index ix_search_metrics_event_created on search_metrics(event_id, created_at);
 create index ix_contact_submissions_submitted_at_utc on contact_submissions(submitted_at_utc desc);

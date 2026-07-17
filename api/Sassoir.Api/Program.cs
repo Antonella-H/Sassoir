@@ -549,17 +549,17 @@ app.MapGet("/api/admin/events/{id:guid}/messages", (Guid id, HttpRequest request
     return store.GetEvent(id) is null ? Results.NotFound() : Results.Ok(store.GetGuestMessages(id));
 });
 
-app.MapGet("/api/admin/events/{id:guid}/floor-plan", (Guid id, HttpRequest request, AuthStore auth, EventStore store) =>
+app.MapGet("/api/admin/events/{id:guid}/floor-plan", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, CancellationToken cancellationToken) =>
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
-    var eventDetails = store.GetEvent(id);
-    return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails.FloorPlan);
+    var floorPlan = await store.GetAdminFloorPlanAsync(id, cancellationToken);
+    return floorPlan is null ? Results.NotFound() : Results.Ok(floorPlan);
 });
 
-app.MapPut("/api/admin/events/{id:guid}/floor-plan", (Guid id, FloorPlanSaveRequest floorPlan, HttpRequest request, AuthStore auth, EventStore store) =>
+app.MapPut("/api/admin/events/{id:guid}/floor-plan", async (Guid id, FloorPlanSaveRequest floorPlan, HttpRequest request, AuthStore auth, EventStore store, CancellationToken cancellationToken) =>
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
-    var result = store.SaveFloorPlan(id, floorPlan);
+    var result = await store.SaveFloorPlanAsync(id, floorPlan, cancellationToken);
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
@@ -902,6 +902,7 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_event_tables_event on event_tables(event_id);
                 create index if not exists ix_floor_plans_event_active on floor_plans(event_id, is_active);
                 create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
+                create index if not exists ix_floor_plan_objects_floor_plan_visible_z on floor_plan_objects(floor_plan_id, is_visible, z_index);
                 create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
                 create index if not exists ix_search_metrics_event_created on search_metrics(event_id, created_at);
                 create index if not exists ix_contact_submissions_submitted_at_utc on contact_submissions(submitted_at_utc desc);
@@ -1259,6 +1260,100 @@ namespace Sassoir.Api.Data
         {
             var eventEntity = EventQuery().SingleOrDefault(item => item.Id == id);
             return eventEntity is null ? null : ToEventDetails(eventEntity);
+        }
+
+        public async Task<FloorPlanDto?> GetAdminFloorPlanAsync(Guid eventId, CancellationToken cancellationToken)
+        {
+            var eventExists = await _db.Events
+                .AsNoTracking()
+                .AnyAsync(item => item.Id == eventId, cancellationToken);
+            if (!eventExists) return null;
+
+            var floorPlan = await _db.FloorPlans
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId && item.IsActive)
+                .OrderByDescending(item => item.Version)
+                .Select(item => new
+                {
+                    item.Id,
+                    item.Name,
+                    item.CanvasAspectRatio
+                })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (floorPlan is null)
+            {
+                return new FloorPlanDto("Venue layout", 1.14m, []);
+            }
+
+            var floorObjects = await _db.FloorPlanObjects
+                .AsNoTracking()
+                .Where(item => item.FloorPlanId == floorPlan.Id && item.IsVisible)
+                .OrderBy(item => item.ZIndex)
+                .Select(item => new
+                {
+                    item.Id,
+                    item.ObjectType,
+                    item.Label,
+                    item.LinkedTableId,
+                    item.X,
+                    item.Y,
+                    item.Width,
+                    item.Height,
+                    item.Shape,
+                    item.ZIndex
+                })
+                .ToArrayAsync(cancellationToken);
+
+            var linkedTableIds = floorObjects
+                .Select(item => item.LinkedTableId)
+                .Where(item => item.HasValue)
+                .Select(item => item!.Value)
+                .Distinct()
+                .ToArray();
+
+            var tableLookup = new Dictionary<Guid, (string Code, string Name)>();
+            if (linkedTableIds.Length > 0)
+            {
+                var linkedTables = await _db.EventTables
+                    .AsNoTracking()
+                    .Where(item => item.EventId == eventId && linkedTableIds.Contains(item.Id))
+                    .Select(item => new
+                    {
+                        item.Id,
+                        item.Code,
+                        item.Name
+                    })
+                    .ToArrayAsync(cancellationToken);
+
+                tableLookup = linkedTables.ToDictionary(item => item.Id, item => (item.Code, item.Name));
+            }
+
+            return new FloorPlanDto(
+                floorPlan.Name,
+                floorPlan.CanvasAspectRatio,
+                floorObjects
+                    .Select(item =>
+                    {
+                        var linkedTable = item.LinkedTableId.HasValue && tableLookup.TryGetValue(item.LinkedTableId.Value, out var table)
+                            ? table
+                            : default;
+
+                        return new FloorPlanObjectDto(
+                            item.Id,
+                            item.ObjectType,
+                            item.Label,
+                            item.LinkedTableId,
+                            linkedTable.Code,
+                            linkedTable.Name,
+                            item.X,
+                            item.Y,
+                            item.Width,
+                            item.Height,
+                            item.Shape,
+                            item.ZIndex);
+                    })
+                    .ToArray());
         }
 
         public IReadOnlyList<AdminEventDto> GetAdminEvents()
@@ -1962,6 +2057,56 @@ namespace Sassoir.Api.Data
             _db.SaveChanges();
             InvalidatePublicCache(eventId);
             return GetEvent(eventId)?.FloorPlan;
+        }
+
+        public async Task<FloorPlanDto?> SaveFloorPlanAsync(Guid eventId, FloorPlanSaveRequest request, CancellationToken cancellationToken)
+        {
+            if (!await _db.Events.AsNoTracking().AnyAsync(item => item.Id == eventId, cancellationToken)) return null;
+
+            var floorPlan = await _db.FloorPlans
+                .Include(item => item.Objects)
+                .SingleOrDefaultAsync(item => item.EventId == eventId && item.IsActive, cancellationToken);
+
+            if (floorPlan is null)
+            {
+                floorPlan = new FloorPlanEntity
+                {
+                    Id = Guid.NewGuid(),
+                    EventId = eventId,
+                    Name = "Venue layout",
+                    CanvasAspectRatio = 1.14m,
+                    Version = 1,
+                    IsActive = true,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                _db.FloorPlans.Add(floorPlan);
+            }
+
+            _db.FloorPlanObjects.RemoveRange(floorPlan.Objects);
+
+            foreach (var item in request.Objects)
+            {
+                _db.FloorPlanObjects.Add(new FloorPlanObjectEntity
+                {
+                    Id = string.IsNullOrWhiteSpace(item.Id) ? $"{item.ObjectType}-{Guid.NewGuid():N}" : item.Id,
+                    FloorPlanId = floorPlan.Id,
+                    LinkedTableId = item.LinkedTableId,
+                    ObjectType = item.ObjectType.Trim(),
+                    Label = item.Label.Trim(),
+                    X = Clamp01(item.X),
+                    Y = Clamp01(item.Y),
+                    Width = Math.Clamp(item.Width, 0.04m, 1m),
+                    Height = Math.Clamp(item.Height, 0.04m, 1m),
+                    Shape = item.Shape,
+                    ZIndex = item.ZIndex,
+                    IsVisible = true
+                });
+            }
+
+            floorPlan.Version += 1;
+            await _db.SaveChangesAsync(cancellationToken);
+            InvalidatePublicCache(eventId);
+            return await GetAdminFloorPlanAsync(eventId, cancellationToken);
         }
 
         public void SaveMessage(string slug, string publicToken, string message)

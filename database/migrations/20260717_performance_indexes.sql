@@ -10,5 +10,6 @@ create index if not exists ix_guest_aliases_normalized_alias_trgm on guest_searc
 create index if not exists ix_event_tables_event on event_tables(event_id);
 create index if not exists ix_floor_plans_event_active on floor_plans(event_id, is_active);
 create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
+create index if not exists ix_floor_plan_objects_floor_plan_visible_z on floor_plan_objects(floor_plan_id, is_visible, z_index);
 create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
 create index if not exists ix_search_metrics_event_created on search_metrics(event_id, created_at);
