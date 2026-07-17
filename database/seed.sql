@@ -31,7 +31,7 @@ values (
   'Welcome to Licha & Roula''s wedding',
   'Search by name',
   'Search by name',
-  '/guest-wedding-banner.png'
+  '/sassoir-logo-sentence.png'
 )
 on conflict do nothing;
 

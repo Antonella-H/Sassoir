@@ -133,6 +133,14 @@ type AdminGuestMessage = {
   createdAt: string;
 };
 
+type ContactSubmission = {
+  id: string;
+  name: string;
+  email: string;
+  message: string;
+  submittedAtUtc: string;
+};
+
 type GuestListCacheEntry = {
   guests: AdminGuest[];
   tables: AdminTable[];
@@ -466,7 +474,7 @@ type EventSectionDefinition = {
 
 type PublicMode = "search" | "seat";
 type PublicLoadState = "loading" | "ready" | "notFound" | "offline";
-type AdminPage = "dashboard" | "events" | "guests" | "floor-plan" | "publish" | "analytics" | "settings";
+type AdminPage = "dashboard" | "events" | "guests" | "floor-plan" | "publish" | "analytics" | "contact-submissions" | "settings";
 
 const defaultEventSlug = "lichaa-and-roula";
 
@@ -630,6 +638,12 @@ const eventFormSections: EventSectionDefinition[] = [
 function getRoute() {
   const path = window.location.pathname || "/";
 
+  if (path === "/") {
+    return {
+      area: "landing" as const,
+    };
+  }
+
   const eventMatch = path.match(/^\/e\/([^/]+)/);
   if (eventMatch?.[1]) {
     return {
@@ -650,6 +664,7 @@ function getAdminPage(path: string): AdminPage {
   if (path.includes("/admin/floor-plan")) return "floor-plan";
   if (path.includes("/admin/publish")) return "publish";
   if (path.includes("/admin/analytics")) return "analytics";
+  if (path.includes("/admin/contact-submissions")) return "contact-submissions";
   if (path.includes("/admin/settings")) return "settings";
   return "dashboard";
 }
@@ -864,7 +879,291 @@ function RoutedApp() {
     return () => window.removeEventListener("popstate", syncRoute);
   }, []);
 
+  if (route.area === "landing") return <LandingPage />;
   return route.area === "admin" ? <AdminDashboard page={route.adminPage} /> : <PublicGuestExperience eventSlug={route.eventSlug} />;
+}
+
+function LandingPage() {
+  const [contactDraft, setContactDraft] = useState({ name: "", email: "", message: "" });
+  const [contactState, setContactState] = useState<"idle" | "sending" | "success" | "error">("idle");
+  const [contactMessage, setContactMessage] = useState("");
+
+  useEffect(() => {
+    const revealEls = Array.from(document.querySelectorAll<HTMLElement>(".landing-page .reveal"));
+    const lineEl = document.querySelector<SVGSVGElement>(".landing-page .steps-line");
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) entry.target.classList.add("in-view");
+      });
+    }, { threshold: 0.2 });
+    revealEls.forEach((element) => observer.observe(element));
+
+    const lineObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) entry.target.classList.add("in-view");
+      });
+    }, { threshold: 0.3 });
+    if (lineEl) lineObserver.observe(lineEl);
+
+    return () => {
+      observer.disconnect();
+      lineObserver.disconnect();
+    };
+  }, []);
+
+  function navigateToAdmin() {
+    window.history.pushState({}, "", "/admin");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function submitContact(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setContactState("sending");
+    setContactMessage("");
+
+    try {
+      const response = await fetch(apiUrl("/api/contact"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(contactDraft),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+
+      setContactDraft({ name: "", email: "", message: "" });
+      setContactState("success");
+      setContactMessage("Message sent. We'll get back to you personally.");
+    } catch (contactError) {
+      setContactState("error");
+      setContactMessage(contactError instanceof Error ? contactError.message : "Could not send your message.");
+    }
+  }
+
+  return (
+    <div className="landing-page">
+      <header>
+        <div className="header-inner">
+          <a href="#" className="brand-mark" aria-label="S'assoir home">
+            <img src="/sassoir-logo.png" alt="S'assoir mark" />
+            <span>S'assoir</span>
+          </a>
+          <nav>
+            <div className="nav-links">
+              <a className="nav-link" href="#how-it-works">How it works</a>
+              <a className="nav-link" href="#planners">For planners</a>
+              <a className="nav-link" href="#roadmap">What's next</a>
+              <a className="nav-link" href="#contact">Contact</a>
+            </div>
+            <button className="btn-login" type="button" onClick={navigateToAdmin}>Log in</button>
+          </nav>
+        </div>
+      </header>
+
+      <section className="hero">
+        <img className="hero-ghost" src="/sassoir-logo.png" alt="" />
+        <div className="hero-inner">
+          <span className="eyebrow-script">Scan, Sit, Share</span>
+          <h1>Every seat has a story.<br />Help your guests find <em>theirs</em> in seconds.</h1>
+          <p className="lead">S'assoir turns a printed seating chart into a five-second phone tap. Guests scan a code, search their name, and walk straight to their table &mdash; no lines, no confusion, no clipboard at the door.</p>
+          <div className="badge"><span className="dot" /> Under construction &mdash; new features added every week</div>
+          <div className="hero-actions">
+            <a href="#how-it-works" className="btn-primary">See how it works</a>
+            <a href="#contact" className="btn-ghost">Get in touch</a>
+          </div>
+        </div>
+      </section>
+
+      <section className="section" id="how-it-works">
+        <div className="wrap">
+          <div className="section-head reveal">
+            <span className="eyebrow">The guest experience</span>
+            <h2>Three steps. No app, no printed chart, no queue.</h2>
+            <p>Built for weddings, galas, corporate dinners, conferences, and every event where seating matters.</p>
+          </div>
+
+          <div className="steps-wrap">
+            <svg className="steps-line" viewBox="0 0 1000 140" preserveAspectRatio="none">
+              <path d="M 165 40 C 300 -20, 380 120, 500 60 C 620 0, 700 130, 835 45" />
+            </svg>
+            <div className="steps">
+              <div className="step reveal">
+                <div className="icon">
+                  <svg viewBox="0 0 24 24" fill="none" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="7" height="7" />
+                    <rect x="14" y="3" width="7" height="7" />
+                    <rect x="3" y="14" width="7" height="7" />
+                    <line x1="14" y1="14" x2="14" y2="21" />
+                    <line x1="21" y1="14" x2="21" y2="21" />
+                    <line x1="14" y1="17.5" x2="21" y2="17.5" />
+                  </svg>
+                </div>
+                <span className="num">01</span>
+                <h3>Scan</h3>
+                <p>A single QR code at the entrance opens the event's own branded page. No downloads, no accounts.</p>
+              </div>
+              <div className="step reveal">
+                <div className="icon">
+                  <svg viewBox="0 0 24 24" fill="none" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M8 13c0 2.2 1.8 4 4 4s4-1.8 4-4" />
+                    <line x1="9" y1="10" x2="9" y2="10.5" />
+                    <line x1="15" y1="10" x2="15" y2="10.5" />
+                  </svg>
+                </div>
+                <span className="num">02</span>
+                <h3>Sit</h3>
+                <p>They search their name and see their exact table and seat on a clear, mobile-friendly floor plan.</p>
+              </div>
+              <div className="step reveal">
+                <div className="icon">
+                  <svg viewBox="0 0 24 24" fill="none" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="6" cy="12" r="2.6" />
+                    <circle cx="18" cy="6" r="2.6" />
+                    <circle cx="18" cy="18" r="2.6" />
+                    <line x1="8.3" y1="10.8" x2="15.7" y2="7.2" />
+                    <line x1="8.3" y1="13.2" x2="15.7" y2="16.8" />
+                  </svg>
+                </div>
+                <span className="num">03</span>
+                <h3>Share</h3>
+                <p>Photos, moments, and table shoutouts &mdash; the next layer of the guest experience, on its way.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="section section-bone" id="planners">
+        <div className="wrap">
+          <div className="section-head reveal">
+            <span className="eyebrow">For planners &amp; hosts</span>
+            <h2>One dashboard for the whole night.</h2>
+            <p>Replace spreadsheets and printed charts with an admin portal built to run the room.</p>
+          </div>
+
+          <div className="planner-grid reveal">
+            <PlannerCard title="Guest lists" text="Import, organize, and update every guest in one place, from RSVP status to dietary notes." icon="users" />
+            <PlannerCard title="Table & seat assignments" text="Build the floor plan and assign seats visually, then publish it as a searchable guest page." icon="table" />
+            <PlannerCard title="Custom branding" text="Every event page carries its own colors, fonts, and identity - never a generic template." icon="brand" />
+            <PlannerCard title="QR code generation" text="Generate and download entrance codes in one click, ready for print or digital signage." icon="qr" />
+            <PlannerCard title="Lightweight analytics" text="See scans, searches, and arrival flow in real time, so you know how the room is filling." icon="analytics" />
+            <PlannerCard title="One event, many hosts" text="Publish an event page in minutes and reuse the same platform for every event you run." icon="host" />
+          </div>
+        </div>
+      </section>
+
+      <section className="section section-dark" id="roadmap">
+        <div className="wrap">
+          <div className="section-head reveal">
+            <span className="eyebrow">What's next</span>
+            <h2>S'assoir is just getting started.</h2>
+            <p>We're actively building. Here's what's joining the platform next.</p>
+          </div>
+          <div className="chips reveal">
+            {["RSVP management", "Digital invitations", "Guest messaging", "Photo sharing", "Menus & schedules", "Sponsor sections", "Advanced analytics", "Subscription plans"].map((chip) => (
+              <span className="chip" key={chip}>{chip}</span>
+            ))}
+          </div>
+          <p className="roadmap-note reveal">Have a feature your events need? We'd love to hear it.</p>
+        </div>
+      </section>
+
+      <section className="section" id="contact">
+        <div className="wrap">
+          <div className="contact-grid">
+            <div className="contact-left reveal">
+              <span className="eyebrow">Contact</span>
+              <h2>Building something for your event?</h2>
+              <p>Whether you're planning one event or running dozens a year, we'd love to hear what you need. Reach out and we'll get back to you personally.</p>
+            </div>
+            <form className="reveal" onSubmit={submitContact}>
+              <div className="field">
+                <label htmlFor="landing-contact-name">Name</label>
+                <input id="landing-contact-name" type="text" value={contactDraft.name} onChange={(event) => setContactDraft({ ...contactDraft, name: event.target.value })} required />
+              </div>
+              <div className="field">
+                <label htmlFor="landing-contact-email">Email</label>
+                <input id="landing-contact-email" type="email" value={contactDraft.email} onChange={(event) => setContactDraft({ ...contactDraft, email: event.target.value })} required />
+              </div>
+              <div className="field">
+                <label htmlFor="landing-contact-message">Message</label>
+                <textarea id="landing-contact-message" value={contactDraft.message} onChange={(event) => setContactDraft({ ...contactDraft, message: event.target.value })} required />
+              </div>
+              <button type="submit" className="form-submit" disabled={contactState === "sending"}>{contactState === "sending" ? "Sending..." : "Send message"}</button>
+              {contactMessage ? <p className={`contact-status ${contactState}`} role={contactState === "error" ? "alert" : "status"}>{contactMessage}</p> : null}
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <div className="footer-inner">
+          <div className="footer-brand">
+            <img src="/sassoir-logo.png" alt="S'assoir" />
+            <span>S'assoir</span>
+          </div>
+          <div className="footer-tag">Scan. Sit. Share.</div>
+          <div className="footer-copy">&copy; 2026 S'assoir. All rights reserved.</div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+function PlannerCard({ title, text, icon }: { title: string; text: string; icon: "users" | "table" | "brand" | "qr" | "analytics" | "host" }) {
+  const paths = {
+    users: (
+      <>
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      </>
+    ),
+    table: (
+      <>
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <line x1="3" y1="9" x2="21" y2="9" />
+        <line x1="9" y1="21" x2="9" y2="9" />
+      </>
+    ),
+    brand: (
+      <>
+        <path d="M12 19l7-7 3 3-7 7-3-3z" />
+        <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
+        <path d="M2 2l7.586 7.586" />
+        <circle cx="11" cy="11" r="2" />
+      </>
+    ),
+    qr: (
+      <>
+        <rect x="3" y="3" width="7" height="7" />
+        <rect x="14" y="3" width="7" height="7" />
+        <rect x="3" y="14" width="7" height="7" />
+        <rect x="14" y="14" width="7" height="7" />
+      </>
+    ),
+    analytics: (
+      <>
+        <path d="M3 3v18h18" />
+        <path d="M7 15l4-5 3 3 5-7" />
+      </>
+    ),
+    host: (
+      <>
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+        <circle cx="12" cy="7" r="4" />
+      </>
+    ),
+  };
+
+  return (
+    <div className="planner-card">
+      <svg className="icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">{paths[icon]}</svg>
+      <h3>{title}</h3>
+      <p>{text}</p>
+    </div>
+  );
 }
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -1255,6 +1554,10 @@ function WelcomeScreen({ event, query, results, loading, apiOnline, searchTouche
 
         {showEmpty ? <p className="guest-search-status" role="status">No guests found</p> : null}
         {!apiOnline ? <span className="guest-demo-source">Demo guest list</span> : null}
+
+        <a className="guest-seat-logo-link" href="/" aria-label="Go to S'assoir home">
+          <img className="guest-seat-logo" src="/sassoir-logo-sentence.png" alt="S'assoir - Scan. Sit. Share." />
+        </a>
       </section>
     </div>
   );
@@ -1298,6 +1601,10 @@ function SeatScreen({ guest, floorObjects, message, sent, onBack, onMessageChang
           <button type="submit">Leave a Message</button>
           {sent ? <p role="status">Message saved. Thank you.</p> : null}
         </form>
+
+        <a className="guest-seat-logo-link" href="/" aria-label="Go to S'assoir home">
+          <img className="guest-seat-logo" src="/sassoir-logo-sentence.png" alt="S'assoir - Scan. Sit. Share." />
+        </a>
       </section>
     </div>
   );
@@ -1839,6 +2146,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
           <button className={page === "events" ? "active" : ""} type="button" onClick={() => navigateAdmin("/admin/events")}><CalendarDays aria-hidden="true" />Events</button>
           <button className={page === "publish" ? "active" : ""} type="button" onClick={() => navigateAdmin("/admin/publish")}><QrCode aria-hidden="true" />Publish</button>
           <button className={page === "analytics" ? "active" : ""} type="button" onClick={() => navigateAdmin("/admin/analytics")}><BarChart3 aria-hidden="true" />Analytics</button>
+          <button className={page === "contact-submissions" ? "active" : ""} type="button" onClick={() => navigateAdmin("/admin/contact-submissions")}><Send aria-hidden="true" />Contact</button>
           </nav>
         </div>
         <nav className="sidebar-secondary">
@@ -1905,6 +2213,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         {page === "floor-plan" ? <FloorPlanAdminPage event={selectedEvent} token={token} activeSubsection="Design" /> : null}
         {page === "publish" ? <PublishPage events={events} saving={saving} onSetPublication={(eventId, status) => void setEventPublication(eventId, status)} /> : null}
         {page === "analytics" ? <AnalyticsPage events={events} /> : null}
+        {page === "contact-submissions" ? <ContactSubmissionsPage token={token} /> : null}
         {page === "settings" ? <SettingsPage /> : null}
       </section>
 
@@ -1932,6 +2241,8 @@ function adminPageTitle(page: AdminPage) {
       return "Publish & QR";
     case "analytics":
       return "Analytics";
+    case "contact-submissions":
+      return "Contact Submissions";
     case "settings":
       return "Settings";
     default:
@@ -1951,6 +2262,8 @@ function adminPageDescription(page: AdminPage) {
       return "Check readiness, publish public links, and prepare QR codes.";
     case "analytics":
       return "Track the guest search and seating experience for each event.";
+    case "contact-submissions":
+      return "Review inquiries sent from the public landing page.";
     case "settings":
       return "Manage organization defaults, privacy, and admin access.";
     default:
@@ -3818,6 +4131,86 @@ function AnalyticsPage({ events }: { events: AdminEvent[] }) {
   );
 }
 
+function ContactSubmissionsPage({ token }: { token: string }) {
+  const [submissions, setSubmissions] = useState<ContactSubmission[]>([]);
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const pageSize = 20;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+
+  const loadSubmissions = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const response = await fetch(apiUrl(`/api/contact?page=${page}&pageSize=${pageSize}`), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(await readError(response));
+
+      const payload = (await response.json()) as PaginatedResponse<ContactSubmission>;
+      setSubmissions(payload.items);
+      setTotalCount(payload.totalCount);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not load contact submissions.");
+    } finally {
+      setLoading(false);
+    }
+  }, [page, token]);
+
+  useEffect(() => {
+    void loadSubmissions();
+  }, [loadSubmissions]);
+
+  return (
+    <section className="admin-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Landing page</p>
+          <h2>Contact submissions</h2>
+        </div>
+        {loading ? <span className="api-status">Loading...</span> : null}
+      </div>
+      {error ? <p className="form-error" role="alert">{error}</p> : null}
+      <div className="admin-table-wrap">
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Email</th>
+              <th>Message</th>
+              <th>Submitted</th>
+            </tr>
+          </thead>
+          <tbody>
+            {submissions.map((submission) => (
+              <tr key={submission.id}>
+                <td data-label="Name"><strong>{submission.name}</strong></td>
+                <td data-label="Email"><a href={`mailto:${submission.email}`}>{submission.email}</a></td>
+                <td data-label="Message">{submission.message}</td>
+                <td data-label="Submitted">{new Date(submission.submittedAtUtc).toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {submissions.length > 0 ? (
+          <div className="pagination">
+            <span>Showing {(page - 1) * pageSize + 1} to {Math.min(page * pageSize, totalCount)} of {totalCount} submissions</span>
+            <div className="page-nums" aria-label="Contact submissions pagination">
+              <button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1}>‹</button>
+              <button className="active" type="button">{page}</button>
+              <button type="button" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page >= totalPages}>›</button>
+            </div>
+          </div>
+        ) : null}
+        {!loading && submissions.length === 0 ? <p className="empty-state">No contact submissions yet.</p> : null}
+      </div>
+    </section>
+  );
+}
+
 function SettingsPage() {
   return (
     <>
@@ -3853,8 +4246,8 @@ function AdminLogin({ onLogin, loading, error }: {
   loading: boolean;
   error: string;
 }) {
-  const [email, setEmail] = useState("admin@sassoir.com");
-  const [password, setPassword] = useState("P@$$w0rd");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [resetToken, setResetToken] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [resetMessage, setResetMessage] = useState("");
@@ -3928,7 +4321,6 @@ function AdminLogin({ onLogin, loading, error }: {
           {error ? <p className="form-error" role="alert">{error}</p> : null}
           {resetError ? <p className="form-error" role="alert">{resetError}</p> : null}
           {resetMessage ? <p className="designer-warning" role="status">{resetMessage}</p> : null}
-          <p className="login-hint">Testing account: admin@sassoir.com</p>
         </form>
 
         {showReset ? (

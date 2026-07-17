@@ -15,6 +15,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
     public DbSet<FloorPlanObjectEntity> FloorPlanObjects => Set<FloorPlanObjectEntity>();
     public DbSet<GuestMessageEntity> GuestMessages => Set<GuestMessageEntity>();
     public DbSet<SearchMetricEntity> SearchMetrics => Set<SearchMetricEntity>();
+    public DbSet<ContactSubmissionEntity> ContactSubmissions => Set<ContactSubmissionEntity>();
     public DbSet<AppUserEntity> Users => Set<AppUserEntity>();
     public DbSet<RoleEntity> Roles => Set<RoleEntity>();
     public DbSet<UserRoleEntity> UserRoles => Set<UserRoleEntity>();
@@ -186,6 +187,18 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.NormalizedQuery).HasColumnName("normalized_query");
             entity.Property(item => item.Successful).HasColumnName("successful");
             entity.Property(item => item.CreatedAt).HasColumnName("created_at");
+        });
+
+        modelBuilder.Entity<ContactSubmissionEntity>(entity =>
+        {
+            entity.ToTable("contact_submissions");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Id).HasColumnName("id");
+            entity.Property(item => item.Name).HasColumnName("name");
+            entity.Property(item => item.Email).HasColumnName("email");
+            entity.Property(item => item.Message).HasColumnName("message");
+            entity.Property(item => item.SubmittedAtUtc).HasColumnName("submitted_at_utc").HasDefaultValueSql("now()");
+            entity.HasIndex(item => item.SubmittedAtUtc).HasDatabaseName("ix_contact_submissions_submitted_at_utc");
         });
 
         modelBuilder.Entity<AppUserEntity>(entity =>
@@ -378,6 +391,15 @@ public sealed class SearchMetricEntity
     public string NormalizedQuery { get; set; } = string.Empty;
     public bool Successful { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class ContactSubmissionEntity
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Email { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public DateTimeOffset SubmittedAtUtc { get; set; }
 }
 
 public sealed class AppUserEntity

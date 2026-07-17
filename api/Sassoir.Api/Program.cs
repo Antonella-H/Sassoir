@@ -563,7 +563,66 @@ app.MapPut("/api/admin/events/{id:guid}/floor-plan", (Guid id, FloorPlanSaveRequ
     return result is null ? Results.NotFound() : Results.Ok(result);
 });
 
+app.MapPost("/api/contact", async (ContactSubmissionRequest submission, SassoirDbContext db, CancellationToken cancellationToken) =>
+{
+    var name = (submission.Name ?? string.Empty).Trim();
+    var email = (submission.Email ?? string.Empty).Trim();
+    var message = (submission.Message ?? string.Empty).Trim();
+    var validation = new Dictionary<string, string[]>();
+
+    if (string.IsNullOrWhiteSpace(name)) validation["name"] = ["Name is required."];
+    if (string.IsNullOrWhiteSpace(email)) validation["email"] = ["Email is required."];
+    else if (!ContactEmailIsValid(email)) validation["email"] = ["Use a valid email address."];
+    if (string.IsNullOrWhiteSpace(message)) validation["message"] = ["Message is required."];
+
+    if (validation.Count > 0) return Results.ValidationProblem(validation);
+
+    var entity = new ContactSubmissionEntity
+    {
+        Id = Guid.NewGuid(),
+        Name = name,
+        Email = email,
+        Message = message,
+        SubmittedAtUtc = DateTimeOffset.UtcNow
+    };
+
+    db.ContactSubmissions.Add(entity);
+    await db.SaveChangesAsync(cancellationToken);
+
+    return Results.Created($"/api/contact/{entity.Id}", new ContactSubmissionDto(entity.Id, entity.Name, entity.Email, entity.Message, entity.SubmittedAtUtc));
+});
+
+app.MapGet("/api/contact", async (HttpRequest request, AuthStore auth, SassoirDbContext db, int? page, int? pageSize, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+
+    var resolvedPage = Math.Max(1, page ?? 1);
+    var resolvedPageSize = Math.Clamp(pageSize ?? 20, 1, 100);
+    var query = db.ContactSubmissions.AsNoTracking().OrderByDescending(item => item.SubmittedAtUtc);
+    var totalCount = await query.CountAsync(cancellationToken);
+    var items = await query
+        .Skip((resolvedPage - 1) * resolvedPageSize)
+        .Take(resolvedPageSize)
+        .Select(item => new ContactSubmissionDto(item.Id, item.Name, item.Email, item.Message, item.SubmittedAtUtc))
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(new PaginatedResponse<ContactSubmissionDto>(items, resolvedPage, resolvedPageSize, totalCount));
+});
+
 app.Run();
+
+static bool ContactEmailIsValid(string email)
+{
+    try
+    {
+        _ = new System.Net.Mail.MailAddress(email);
+        return true;
+    }
+    catch
+    {
+        return false;
+    }
+}
 
 static string? NormalizePostgresConnectionString(string? connectionString, IConfiguration configuration)
 {
@@ -801,6 +860,14 @@ namespace Sassoir.Api.Data
                   created_at timestamptz not null default now()
                 );
 
+                create table if not exists contact_submissions (
+                  id uuid primary key default gen_random_uuid(),
+                  name text not null,
+                  email text not null,
+                  message text not null,
+                  submitted_at_utc timestamptz not null default now()
+                );
+
                 create table if not exists app_users (
                   id uuid primary key default gen_random_uuid(),
                   organization_id uuid references organizations(id) on delete set null,
@@ -837,6 +904,7 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
                 create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
                 create index if not exists ix_search_metrics_event_created on search_metrics(event_id, created_at);
+                create index if not exists ix_contact_submissions_submitted_at_utc on contact_submissions(submitted_at_utc desc);
                 create index if not exists ix_app_users_email on app_users(email);
             """);
         }
@@ -3020,6 +3088,10 @@ namespace Sassoir.Api.Models
     public sealed record GuestMessageRequest(string Message);
 
     public sealed record AdminGuestMessageDto(Guid Id, string GuestName, string Message, DateTimeOffset CreatedAt);
+
+    public sealed record ContactSubmissionRequest(string Name, string Email, string Message);
+
+    public sealed record ContactSubmissionDto(Guid Id, string Name, string Email, string Message, DateTimeOffset SubmittedAtUtc);
 
     public sealed record PaginatedResponse<T>(IReadOnlyList<T> Items, int Page, int PageSize, int TotalCount);
 
