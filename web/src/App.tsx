@@ -944,8 +944,7 @@ function LandingPage() {
       <header>
         <div className="header-inner">
           <a href="#" className="brand-mark" aria-label="S'assoir home">
-            <img src="/sassoir-logo.png" alt="S'assoir mark" />
-            <span>S'assoir</span>
+            <img src="/sassoir-logo-sentence.png" alt="S'assoir" />
           </a>
           <nav>
             <div className="nav-links">
@@ -960,15 +959,17 @@ function LandingPage() {
       </header>
 
       <section className="hero">
-        <img className="hero-ghost" src="/sassoir-logo.png" alt="" />
         <div className="hero-inner">
-          <span className="eyebrow-script">Scan, Sit, Share</span>
-          <h1>Every seat has a story.<br />Help your guests find <em>theirs</em> in seconds.</h1>
-          <p className="lead">S'assoir turns a printed seating chart into a five-second phone tap. Guests scan a code, search their name, and walk straight to their table &mdash; no lines, no confusion, no clipboard at the door.</p>
-          <div className="badge"><span className="dot" /> Under construction &mdash; new features added every week</div>
-          <div className="hero-actions">
-            <a href="#how-it-works" className="btn-primary">See how it works</a>
-            <a href="#contact" className="btn-ghost">Get in touch</a>
+          <img className="hero-ghost" src="/sassoir-logo.png" alt="" />
+          <div className="hero-text">
+            <span className="eyebrow-script">Scan, Sit, Share</span>
+            <h1>Every seat has a story.<br />Help your guests find <em>theirs</em> in seconds.</h1>
+            <p className="lead">S'assoir turns a printed seating chart into a five-second phone tap. Guests scan a code, search their name, and walk straight to their table &mdash; no lines, no confusion, no clipboard at the door.</p>
+            <div className="badge"><span className="dot" /> Under construction &mdash; new features added every week</div>
+            <div className="hero-actions">
+              <a href="#how-it-works" className="btn-primary">See how it works</a>
+              <a href="#contact" className="btn-ghost">Get in touch</a>
+            </div>
           </div>
         </div>
       </section>
@@ -1632,13 +1633,16 @@ function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject
 
   if (!highlightedObject) return <MinimalFloorPlan tableCode={tableCode} />;
 
-  const routeStart = centerOfObject(entranceObject ?? { x: 0.12, y: 0.84, width: 0.16, height: 0.08 });
-  const routeEnd = centerOfObject(highlightedObject);
+  const routePath = buildGuestRoutePath(
+    entranceObject ?? { id: "guest-route-entrance", type: "entrance", label: "Entrance", x: 0.12, y: 0.84, width: 0.16, height: 0.08, shape: "rect" },
+    highlightedObject,
+    objects,
+  );
 
   return (
     <section className="minimal-floor-plan" aria-label={`Floor plan highlighting table ${tableCode}`}>
       <svg className="guest-plan-route-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-        <path d={`M ${routeStart.x} ${routeStart.y} L ${routeStart.x} ${routeEnd.y} L ${routeEnd.x} ${routeEnd.y}`} />
+        <path d={routePath} />
       </svg>
       {objects.map((object) => {
         const highlighted = object.id === highlightedObject.id;
@@ -1668,6 +1672,177 @@ function centerOfObject(object: Pick<FloorObject, "x" | "y" | "width" | "height"
     x: (object.x + object.width / 2) * 100,
     y: (object.y + object.height / 2) * 100,
   };
+}
+
+type FloorRoutePoint = { x: number; y: number };
+
+function buildGuestRoutePath(startObject: FloorObject, endObject: FloorObject, objects: FloorObject[]) {
+  const startCenter = centerOfObject(startObject);
+  const endCenter = centerOfObject(endObject);
+  const start = edgeAnchor(startObject, endCenter, 2);
+  const end = edgeAnchor(endObject, startCenter, 2);
+  const pathPoints = findFloorRoute(start, end, objects, new Set([startObject.id, endObject.id]));
+
+  return pointsToPath(pathPoints.length > 0 ? pathPoints : [start, { x: start.x, y: end.y }, end]);
+}
+
+function edgeAnchor(object: FloorObject, toward: FloorRoutePoint, offset: number): FloorRoutePoint {
+  const center = centerOfObject(object);
+  const halfWidth = Math.max(object.width * 50, 1);
+  const halfHeight = Math.max(object.height * 50, 1);
+  const dx = toward.x - center.x;
+  const dy = toward.y - center.y;
+
+  if (Math.abs(dx / halfWidth) > Math.abs(dy / halfHeight)) {
+    return {
+      x: clampPercent(center.x + Math.sign(dx || 1) * (halfWidth + offset)),
+      y: clampPercent(center.y),
+    };
+  }
+
+  return {
+    x: clampPercent(center.x),
+    y: clampPercent(center.y + Math.sign(dy || 1) * (halfHeight + offset)),
+  };
+}
+
+function findFloorRoute(start: FloorRoutePoint, end: FloorRoutePoint, objects: FloorObject[], ignoredObjectIds: Set<string>) {
+  const gridStep = 2;
+  const routePadding = 3.5;
+  const obstacles = objects
+    .filter((object) => !ignoredObjectIds.has(object.id))
+    .map((object) => ({
+      left: object.x * 100 - routePadding,
+      right: (object.x + object.width) * 100 + routePadding,
+      top: object.y * 100 - routePadding,
+      bottom: (object.y + object.height) * 100 + routePadding,
+    }));
+
+  const blocked = (point: FloorRoutePoint) => obstacles.some((obstacle) => (
+    point.x >= obstacle.left &&
+    point.x <= obstacle.right &&
+    point.y >= obstacle.top &&
+    point.y <= obstacle.bottom
+  ));
+
+  const startGrid = nearestOpenGridPoint(start, gridStep, blocked);
+  const endGrid = nearestOpenGridPoint(end, gridStep, blocked);
+  const startKey = routeKey(startGrid);
+  const endKey = routeKey(endGrid);
+  const open = new Set([startKey]);
+  const cameFrom = new globalThis.Map<string, string>();
+  const points = new globalThis.Map<string, FloorRoutePoint>([[startKey, startGrid]]);
+  const gScore = new globalThis.Map<string, number>([[startKey, 0]]);
+  const fScore = new globalThis.Map<string, number>([[startKey, routeDistance(startGrid, endGrid)]]);
+
+  while (open.size > 0) {
+    let currentKey = "";
+    let currentScore = Number.POSITIVE_INFINITY;
+    open.forEach((key) => {
+      const score = fScore.get(key) ?? Number.POSITIVE_INFINITY;
+      if (score < currentScore) {
+        currentScore = score;
+        currentKey = key;
+      }
+    });
+
+    if (currentKey === endKey) {
+      const route = simplifyRoute(reconstructRoute(currentKey, cameFrom, points));
+      return [start, ...route, end];
+    }
+
+    open.delete(currentKey);
+    const current = points.get(currentKey);
+    if (!current) continue;
+
+    for (const neighbor of routeNeighbors(current, gridStep)) {
+      if (blocked(neighbor)) continue;
+
+      const neighborKey = routeKey(neighbor);
+      const tentativeScore = (gScore.get(currentKey) ?? 0) + routeDistance(current, neighbor);
+      if (tentativeScore >= (gScore.get(neighborKey) ?? Number.POSITIVE_INFINITY)) continue;
+
+      cameFrom.set(neighborKey, currentKey);
+      points.set(neighborKey, neighbor);
+      gScore.set(neighborKey, tentativeScore);
+      fScore.set(neighborKey, tentativeScore + routeDistance(neighbor, endGrid));
+      open.add(neighborKey);
+    }
+  }
+
+  return [];
+}
+
+function nearestOpenGridPoint(point: FloorRoutePoint, step: number, blocked: (point: FloorRoutePoint) => boolean) {
+  const snapped = {
+    x: clampPercent(Math.round(point.x / step) * step),
+    y: clampPercent(Math.round(point.y / step) * step),
+  };
+
+  if (!blocked(snapped)) return snapped;
+
+  for (let radius = step; radius <= 16; radius += step) {
+    for (let x = snapped.x - radius; x <= snapped.x + radius; x += step) {
+      for (let y = snapped.y - radius; y <= snapped.y + radius; y += step) {
+        const candidate = { x: clampPercent(x), y: clampPercent(y) };
+        if (!blocked(candidate)) return candidate;
+      }
+    }
+  }
+
+  return snapped;
+}
+
+function routeNeighbors(point: FloorRoutePoint, step: number) {
+  return [
+    { x: point.x + step, y: point.y },
+    { x: point.x - step, y: point.y },
+    { x: point.x, y: point.y + step },
+    { x: point.x, y: point.y - step },
+  ].filter((neighbor) => neighbor.x >= 0 && neighbor.x <= 100 && neighbor.y >= 0 && neighbor.y <= 100);
+}
+
+function reconstructRoute(currentKey: string, cameFrom: Map<string, string>, points: Map<string, FloorRoutePoint>) {
+  const route: FloorRoutePoint[] = [];
+  let key = currentKey;
+
+  while (points.has(key)) {
+    route.unshift(points.get(key)!);
+    const previous = cameFrom.get(key);
+    if (!previous) break;
+    key = previous;
+  }
+
+  return route;
+}
+
+function simplifyRoute(points: FloorRoutePoint[]) {
+  return points.filter((point, index) => {
+    const previous = points[index - 1];
+    const next = points[index + 1];
+    if (!previous || !next) return true;
+    return !((previous.x === point.x && point.x === next.x) || (previous.y === point.y && point.y === next.y));
+  });
+}
+
+function pointsToPath(points: FloorRoutePoint[]) {
+  return points.map((point, index) => `${index === 0 ? "M" : "L"} ${roundRouteValue(point.x)} ${roundRouteValue(point.y)}`).join(" ");
+}
+
+function routeKey(point: FloorRoutePoint) {
+  return `${roundRouteValue(point.x)},${roundRouteValue(point.y)}`;
+}
+
+function routeDistance(a: FloorRoutePoint, b: FloorRoutePoint) {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+}
+
+function clampPercent(value: number) {
+  return Math.min(100, Math.max(0, value));
+}
+
+function roundRouteValue(value: number) {
+  return Math.round(value * 10) / 10;
 }
 
 function FloorPlanScreen({ event, guest, floorObjects, highlightedTableId, zoom, onBack, onZoomIn, onZoomOut, onCenter }: {
