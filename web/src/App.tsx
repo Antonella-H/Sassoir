@@ -1,4 +1,4 @@
-import { ChangeEvent, Component, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, Component, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArrowLeft,
@@ -63,6 +63,20 @@ type SearchResult = {
   publicToken: string;
   displayName: string;
   groupLabel: string;
+};
+
+type PublicSeatResult = {
+  publicToken: string;
+  displayName: string;
+  groupLabel: string;
+  tableCode: string;
+  tableName: string;
+  seatNumber?: string | null;
+  directions: string;
+  companions: string[];
+  event?: PublicEvent;
+  floorPlan?: { objects?: unknown[] } | null;
+  highlightedObjectId?: string | null;
 };
 
 type FloorObject = {
@@ -130,6 +144,8 @@ type FloorPlanCacheEntry = GuestListCacheEntry & {
 
 const guestListCache = new globalThis.Map<string, GuestListCacheEntry>();
 const floorPlanCache = new globalThis.Map<string, FloorPlanCacheEntry>();
+const publicEventCache = new globalThis.Map<string, { event: PublicEvent; floorObjects: FloorObject[] }>();
+const minimumGuestSearchCharacters = 2;
 
 function clearEventAdminCaches(eventId: string) {
   guestListCache.delete(eventId);
@@ -631,6 +647,17 @@ function eventStatusText(status: string | number) {
   }
 }
 
+function useDebouncedValue<T>(value: T, delayMs: number) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedValue(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debouncedValue;
+}
+
 export default function App() {
   return (
     <AppErrorBoundary>
@@ -692,9 +719,13 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
   const [apiOnline, setApiOnline] = useState(false);
   const [message, setMessage] = useState("");
   const [sent, setSent] = useState(false);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const seatAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    const cached = publicEventCache.get(eventSlug);
+    const controller = new AbortController();
 
     async function loadEvent() {
       setLoadState("loading");
@@ -703,10 +734,18 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
       setQuery("");
       setRemoteResults(null);
 
+      if (cached) {
+        setEvent(cached.event);
+        setFloorObjects(cached.floorObjects);
+        setApiOnline(true);
+        setLoadState("ready");
+        return;
+      }
+
       try {
         const [eventResponse, floorPlanResponse] = await Promise.all([
-          fetch(apiUrl(`/api/public/events/${eventSlug}`)),
-          fetch(apiUrl(`/api/public/events/${eventSlug}/floor-plan`)),
+          fetch(apiUrl(`/api/public/events/${eventSlug}`), { signal: controller.signal }),
+          fetch(apiUrl(`/api/public/events/${eventSlug}/floor-plan`), { signal: controller.signal }),
         ]);
 
         if (eventResponse.status === 404) {
@@ -720,12 +759,15 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
         const floorPlan = floorPlanResponse.ok ? await floorPlanResponse.json() : null;
         if (cancelled) return;
 
+        const nextFloorObjects = toFloorObjects(floorPlan?.objects);
         setEvent(publicEvent);
-        setFloorObjects(toFloorObjects(floorPlan?.objects));
+        setFloorObjects(nextFloorObjects);
+        publicEventCache.set(eventSlug, { event: publicEvent, floorObjects: nextFloorObjects });
         setApiOnline(true);
         setLoadState("ready");
-      } catch {
+      } catch (loadError) {
         if (cancelled) return;
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
 
         if (eventSlug === defaultEventSlug) {
           setEvent(fallbackEvent);
@@ -742,11 +784,12 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
     void loadEvent();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [eventSlug]);
 
   const localResults = useMemo(() => {
-    if (normalizeSearch(query).length < 2) return [];
+    if (normalizeSearch(query).length < minimumGuestSearchCharacters) return [];
 
     return fallbackGuests
       .map((guest) => ({ guest, rank: rankGuest(guest, query) }))
@@ -767,12 +810,16 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
       const normalizedQuery = normalizeSearch(rawQuery);
       setSearchTouched(true);
 
-      if (normalizedQuery.length < 2) {
+      if (normalizedQuery.length < minimumGuestSearchCharacters) {
+        searchAbortRef.current?.abort();
         setRemoteResults(null);
         setLoading(false);
         return;
       }
 
+      searchAbortRef.current?.abort();
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
       setLoading(true);
 
       try {
@@ -780,16 +827,21 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ query: rawQuery }),
+          signal: controller.signal,
         });
         if (!response.ok) throw new Error("Search failed");
         const payload = await response.json();
         setRemoteResults(payload.results ?? []);
         setApiOnline(true);
-      } catch {
+      } catch (searchError) {
+        if (searchError instanceof DOMException && searchError.name === "AbortError") return;
         setRemoteResults(null);
         setApiOnline(false);
       } finally {
-        setLoading(false);
+        if (searchAbortRef.current === controller) {
+          searchAbortRef.current = null;
+          setLoading(false);
+        }
       }
     },
     [eventSlug],
@@ -799,7 +851,8 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
     const normalizedQuery = normalizeSearch(query);
     setRemoteResults(null);
 
-    if (normalizedQuery.length < 2) {
+    if (normalizedQuery.length < minimumGuestSearchCharacters) {
+      searchAbortRef.current?.abort();
       setLoading(false);
       return;
     }
@@ -817,10 +870,14 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
   }
 
   async function chooseGuest(searchResult: SearchResult) {
+    seatAbortRef.current?.abort();
+    const controller = new AbortController();
+    seatAbortRef.current = controller;
+
     try {
-      const response = await fetch(apiUrl(`/api/public/events/${eventSlug}/guests/${searchResult.publicToken}`));
+      const response = await fetch(apiUrl(`/api/public/events/${eventSlug}/guests/${searchResult.publicToken}`), { signal: controller.signal });
       if (!response.ok) throw new Error("Lookup failed");
-      const payload = await response.json();
+      const payload = (await response.json()) as PublicSeatResult;
       setSelectedGuest({
         publicToken: searchResult.publicToken,
         displayName: payload.displayName,
@@ -833,12 +890,20 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
         companions: payload.companions ?? [],
       });
       if (payload.event) setEvent(payload.event);
+      if (payload.floorPlan?.objects) {
+        setFloorObjects(toFloorObjects(payload.floorPlan.objects as any[]));
+      }
       setApiOnline(true);
-    } catch {
+    } catch (seatError) {
+      if (seatError instanceof DOMException && seatError.name === "AbortError") return;
       const fallbackGuest = findFallbackGuest(searchResult.publicToken);
       if (!fallbackGuest) return;
       setSelectedGuest(fallbackGuest);
       setApiOnline(false);
+    } finally {
+      if (seatAbortRef.current === controller) {
+        seatAbortRef.current = null;
+      }
     }
 
     setMode("seat");
@@ -1958,6 +2023,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const [bulkTableId, setBulkTableId] = useState("");
   const [showBulkAssignDialog, setShowBulkAssignDialog] = useState(false);
   const [guestPage, setGuestPage] = useState(1);
+  const debouncedQuery = useDebouncedValue(query, 300);
 
   const loadGuests = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
@@ -2254,7 +2320,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
 
   const activeGuests = guests.filter((guest) => guest.status === "Active");
   const seatingGuests = guests.filter((guest) => guest.status === "Active" || guest.status === "CheckedIn");
-  const normalizedQuery = normalizeSearch(query);
+  const normalizedQuery = normalizeSearch(debouncedQuery);
   const visibleGuests = guests.filter((guest) => {
     const text = normalizeSearch(`${guest.firstName} ${guest.lastName} ${guest.displayName} ${guest.notes} ${guest.tableCode} ${guest.tableName}`);
     const matchesQuery = !normalizedQuery || text.includes(normalizedQuery);

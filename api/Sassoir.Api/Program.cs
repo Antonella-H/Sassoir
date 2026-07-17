@@ -4,7 +4,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 using Npgsql;
@@ -19,27 +23,15 @@ if (!string.IsNullOrWhiteSpace(port) && string.IsNullOrWhiteSpace(Environment.Ge
     builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 }
 
-var allowedOrigins = builder.Configuration
-    .GetSection("Cors:AllowedOrigins")
-    .GetChildren()
-    .Select(origin => origin.Value)
-    .Concat((builder.Configuration["Cors:AllowedOrigins"] ?? string.Empty)
-        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-    .Where(origin => !string.IsNullOrWhiteSpace(origin))
-    .Select(origin => origin!.Trim().TrimEnd('/'))
-    .Distinct(StringComparer.OrdinalIgnoreCase)
-    .ToArray();
-
-if (allowedOrigins is null || allowedOrigins.Length == 0)
-{
-    allowedOrigins = ["http://127.0.0.1:5173", "http://localhost:5173"];
-}
+var allowedOrigins = GetAllowedOrigins(builder.Configuration);
 
 builder.Services.AddDbContext<SassoirDbContext>(options =>
 {
-    options.UseNpgsql(NormalizePostgresConnectionString(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseNpgsql(NormalizePostgresConnectionString(builder.Configuration.GetConnectionString("DefaultConnection"), builder.Configuration));
 });
 builder.Services.AddScoped<EventStore>();
+builder.Services.AddMemoryCache();
+builder.Services.AddHealthChecks();
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
 builder.Services.AddScoped<AuthStore>();
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -59,7 +51,28 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(["application/json"]);
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(options => options.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(options => options.Level = System.IO.Compression.CompressionLevel.Fastest);
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("PublicEvent", context => FixedWindowPolicy(context, "RateLimiting:PublicEventPerMinute", 60));
+    options.AddPolicy("PublicSearch", context => FixedWindowPolicy(context, "RateLimiting:GuestSearchPerMinute", 30));
+    options.AddPolicy("PublicSeat", context => FixedWindowPolicy(context, "RateLimiting:SeatResultPerMinute", 30));
+    options.AddPolicy("PublicMessage", context => FixedWindowPolicy(context, "RateLimiting:GuestMessagePerMinute", 5));
+});
+
 var app = builder.Build();
+
+app.Logger.LogInformation("Configured CORS origins: {CorsOrigins}", string.Join(", ", allowedOrigins));
 
 using (var scope = app.Services.CreateScope())
 {
@@ -67,7 +80,41 @@ using (var scope = app.Services.CreateScope())
     DatabaseInitializer.EnsureSchema(db);
 }
 
+app.UseResponseCompression();
 app.UseCors("ConfiguredWebOrigins");
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    var correlationId = context.Request.Headers["X-Correlation-ID"].FirstOrDefault();
+    if (string.IsNullOrWhiteSpace(correlationId))
+    {
+        correlationId = Guid.NewGuid().ToString("N");
+    }
+
+    context.Response.Headers["X-Correlation-ID"] = correlationId;
+    var started = System.Diagnostics.Stopwatch.StartNew();
+
+    try
+    {
+        await next();
+    }
+    finally
+    {
+        started.Stop();
+        var endpoint = context.GetEndpoint()?.DisplayName ?? $"{context.Request.Method} {context.Request.Path}";
+        var logLevel = started.ElapsedMilliseconds >= app.Configuration.GetValue("Performance:SlowRequestMilliseconds", 750)
+            ? LogLevel.Warning
+            : LogLevel.Information;
+        app.Logger.Log(logLevel,
+            "HTTP {Method} {Path} completed {StatusCode} in {ElapsedMilliseconds}ms correlationId={CorrelationId} endpoint={Endpoint}",
+            context.Request.Method,
+            context.Request.Path.Value,
+            context.Response.StatusCode,
+            started.ElapsedMilliseconds,
+            correlationId,
+            endpoint);
+    }
+});
 
 var configuredUploadRoot = app.Configuration["Uploads:RootPath"];
 var uploadRoot = Path.GetFullPath(string.IsNullOrWhiteSpace(configuredUploadRoot)
@@ -77,7 +124,11 @@ Directory.CreateDirectory(uploadRoot);
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(uploadRoot),
-    RequestPath = "/api/uploads"
+    RequestPath = "/api/uploads",
+    OnPrepareResponse = context =>
+    {
+        context.Context.Response.Headers.CacheControl = "public,max-age=86400";
+    }
 });
 
 app.MapGet("/api/health", () => Results.Ok(new
@@ -86,6 +137,14 @@ app.MapGet("/api/health", () => Results.Ok(new
     service = "sassoir-api",
     time = DateTimeOffset.UtcNow
 }));
+app.MapGet("/api/health/live", () => Results.Ok(new { status = "live", time = DateTimeOffset.UtcNow }));
+app.MapGet("/api/health/ready", async (SassoirDbContext db, CancellationToken cancellationToken) =>
+{
+    var databaseReady = await db.Database.CanConnectAsync(cancellationToken);
+    return databaseReady
+        ? Results.Ok(new { status = "ready", database = "ok", time = DateTimeOffset.UtcNow })
+        : Results.Problem("Database is unavailable.", statusCode: StatusCodes.Status503ServiceUnavailable);
+});
 
 app.MapPost("/api/auth/login", (LoginRequest request, AuthStore auth) =>
 {
@@ -167,19 +226,22 @@ app.MapPost("/api/admin/uploads/event-image", async (HttpRequest request, AuthSt
     return Results.Ok(new UploadResponse(dataUrl));
 }).DisableAntiforgery();
 
-app.MapGet("/api/public/events/{slug}", (string slug, EventStore store) =>
+var publicApi = app.MapGroup("/api/public/events")
+    .WithTags("Public API");
+
+publicApi.MapGet("/{slug}", async (string slug, EventStore store, CancellationToken cancellationToken) =>
 {
-    var eventDetails = store.GetPublishedPublicEvent(slug);
+    var eventDetails = await store.GetPublishedPublicEventAsync(slug, cancellationToken);
     return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails);
-});
+}).RequireRateLimiting("PublicEvent");
 
-app.MapGet("/api/public/events/{slug}/floor-plan", (string slug, EventStore store) =>
+publicApi.MapGet("/{slug}/floor-plan", async (string slug, EventStore store, CancellationToken cancellationToken) =>
 {
-    var floorPlan = store.GetPublishedFloorPlan(slug);
+    var floorPlan = await store.GetPublishedFloorPlanAsync(slug, cancellationToken);
     return floorPlan is null ? Results.NotFound() : Results.Ok(floorPlan);
-});
+}).RequireRateLimiting("PublicEvent");
 
-app.MapPost("/api/public/events/{slug}/guests/search", (string slug, GuestSearchRequest request, EventStore store) =>
+publicApi.MapPost("/{slug}/guests/search", async (string slug, GuestSearchRequest request, EventStore store, CancellationToken cancellationToken) =>
 {
     var query = SearchNormalizer.Normalize(request.Query);
     if (query.Length < 2)
@@ -187,46 +249,71 @@ app.MapPost("/api/public/events/{slug}/guests/search", (string slug, GuestSearch
         return Results.Ok(new GuestSearchResponse([]));
     }
 
-    var results = store.SearchPublicGuests(slug, query);
+    var results = await store.SearchPublicGuestsAsync(slug, query, cancellationToken);
 
-    store.TrackSearch(slug, query, results.Length > 0);
+    await store.TrackSearchAsync(slug, query, results.Length > 0, cancellationToken);
     return Results.Ok(new GuestSearchResponse(results));
-});
+}).RequireRateLimiting("PublicSearch");
 
-app.MapGet("/api/public/events/{slug}/guests/{publicToken}", (string slug, string publicToken, EventStore store) =>
+publicApi.MapGet("/{slug}/guests/{publicToken}", async (string slug, string publicToken, EventStore store, CancellationToken cancellationToken) =>
 {
-    var guest = store.GetPublicGuestSeat(slug, publicToken);
+    var guest = await store.GetPublicGuestSeatAsync(slug, publicToken, cancellationToken);
 
     return guest is null
         ? Results.NotFound()
         : Results.Ok(guest);
-});
+}).RequireRateLimiting("PublicSeat");
 
-app.MapGet("/api/public/events/{slug}/guests/{publicToken}/floor-plan", (string slug, string publicToken, EventStore store) =>
+publicApi.MapGet("/{slug}/guests/{publicToken}/floor-plan", async (string slug, string publicToken, EventStore store, CancellationToken cancellationToken) =>
 {
-    var floorPlan = store.GetPublicGuestFloorPlan(slug, publicToken);
+    var floorPlan = await store.GetPublicGuestFloorPlanAsync(slug, publicToken, cancellationToken);
 
     return floorPlan is null
         ? Results.NotFound()
         : Results.Ok(floorPlan);
-});
+}).RequireRateLimiting("PublicSeat");
 
-app.MapPost("/api/public/events/{slug}/guests/{publicToken}/messages", (string slug, string publicToken, GuestMessageRequest request, EventStore store) =>
+publicApi.MapPost("/{slug}/guests/{publicToken}/messages", async (string slug, string publicToken, GuestMessageRequest request, EventStore store, CancellationToken cancellationToken) =>
 {
-    var eventDetails = store.GetPublishedEvent(slug);
-    var guest = eventDetails?.Guests.SingleOrDefault(item => item.PublicToken == publicToken);
-
-    if (guest is null || eventDetails is null) return Results.NotFound();
     if (string.IsNullOrWhiteSpace(request.Message)) return Results.BadRequest(new { message = "Message is required." });
 
-    store.SaveMessage(slug, publicToken, request.Message.Trim());
-    return Results.Created($"/api/public/events/{slug}/guests/{publicToken}/messages", new { status = "saved" });
-});
+    var saved = await store.SaveMessageAsync(slug, publicToken, request.Message.Trim(), cancellationToken);
+    if (!saved) return Results.NotFound();
 
-app.MapGet("/api/admin/events", (HttpRequest request, AuthStore auth, EventStore store) =>
+    return Results.Created($"/api/public/events/{slug}/guests/{publicToken}/messages", new { status = "saved" });
+}).RequireRateLimiting("PublicMessage");
+
+var adminApi = app.MapGroup("/api/admin")
+    .WithTags("Admin API");
+
+adminApi.MapGet("/events", (HttpRequest request, AuthStore auth, EventStore store) =>
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
     return Results.Ok(store.GetAdminEvents());
+});
+
+adminApi.MapGet("/events/page", async (HttpRequest request, AuthStore auth, EventStore store, string? search, string? status, int? page, int? pageSize, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    return Results.Ok(await store.GetAdminEventsPageAsync(search, status, page, pageSize, cancellationToken));
+});
+
+adminApi.MapGet("/events/{id:guid}/guests/page", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, string? search, string? status, string? tableId, int? page, int? pageSize, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    return Results.Ok(await store.GetAdminGuestsPageAsync(id, search, status, tableId, page, pageSize, cancellationToken));
+});
+
+adminApi.MapGet("/events/{id:guid}/tables/page", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, string? search, int? page, int? pageSize, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    return Results.Ok(await store.GetAdminTablesPageAsync(id, search, page, pageSize, cancellationToken));
+});
+
+adminApi.MapGet("/events/{id:guid}/messages/page", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, int? page, int? pageSize, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+    return Results.Ok(await store.GetGuestMessagesPageAsync(id, page, pageSize, cancellationToken));
 });
 
 app.MapGet("/api/admin/events/{id:guid}", (Guid id, HttpRequest request, AuthStore auth, EventStore store) =>
@@ -478,13 +565,22 @@ app.MapPut("/api/admin/events/{id:guid}/floor-plan", (Guid id, FloorPlanSaveRequ
 
 app.Run();
 
-static string? NormalizePostgresConnectionString(string? connectionString)
+static string? NormalizePostgresConnectionString(string? connectionString, IConfiguration configuration)
 {
     if (string.IsNullOrWhiteSpace(connectionString)) return connectionString;
+    var maxPoolSize = Math.Max(5, configuration.GetValue("Database:MaxPoolSize", 20));
+    var commandTimeout = Math.Max(5, configuration.GetValue("Database:CommandTimeoutSeconds", 30));
+
     if (!connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) &&
         !connectionString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
     {
-        return connectionString;
+        var existingBuilder = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            Pooling = true,
+            MaxPoolSize = maxPoolSize,
+            CommandTimeout = commandTimeout
+        };
+        return existingBuilder.ConnectionString;
     }
 
     var uri = new Uri(connectionString);
@@ -498,10 +594,61 @@ static string? NormalizePostgresConnectionString(string? connectionString)
         Database = Uri.UnescapeDataString(database),
         Username = credentials.Length > 0 ? Uri.UnescapeDataString(credentials[0]) : string.Empty,
         Password = credentials.Length > 1 ? Uri.UnescapeDataString(credentials[1]) : string.Empty,
-        SslMode = SslMode.Require
+        SslMode = SslMode.Require,
+        Pooling = true,
+        MaxPoolSize = maxPoolSize,
+        CommandTimeout = commandTimeout
     };
 
     return builder.ConnectionString;
+}
+
+static string[] GetAllowedOrigins(IConfiguration configuration)
+{
+    string[] defaultOrigins =
+    [
+        "https://sassoir.com",
+        "https://www.sassoir.com",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173"
+    ];
+
+    var configuredOrigins = configuration
+        .GetSection("Cors:AllowedOrigins")
+        .GetChildren()
+        .Select(origin => origin.Value)
+        .Concat(ParseOrigins(configuration["Cors:AllowedOrigins"]))
+        .Concat(ParseOrigins(configuration["CORS_ALLOWED_ORIGINS"]))
+        .Concat(ParseOrigins(configuration["ALLOWED_ORIGINS"]));
+
+    return defaultOrigins
+        .Concat(configuredOrigins)
+        .Where(origin => !string.IsNullOrWhiteSpace(origin))
+        .Select(origin => origin!.Trim().Trim('"', '\'').TrimEnd('/'))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+}
+
+static string[] ParseOrigins(string? value)
+{
+    return string.IsNullOrWhiteSpace(value)
+        ? []
+        : value.Split([',', ';', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+}
+
+static RateLimitPartition<string> FixedWindowPolicy(HttpContext context, string configKey, int fallbackPermitLimit)
+{
+    var configuration = context.RequestServices.GetRequiredService<IConfiguration>();
+    var permitLimit = Math.Max(1, configuration.GetValue(configKey, fallbackPermitLimit));
+    var partitionKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+    return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
+    {
+        PermitLimit = permitLimit,
+        Window = TimeSpan.FromMinutes(1),
+        QueueLimit = 0,
+        AutoReplenishment = true
+    });
 }
 
 namespace Sassoir.Api.Data
@@ -512,6 +659,7 @@ namespace Sassoir.Api.Data
         {
             db.Database.ExecuteSqlRaw("""
                 create extension if not exists pgcrypto;
+                create extension if not exists pg_trgm;
 
                 create table if not exists organizations (
                   id uuid primary key default gen_random_uuid(),
@@ -682,10 +830,15 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_events_organization_id on events(organization_id);
                 create index if not exists ix_events_slug_status on events(slug, status);
                 create index if not exists ix_guests_event_search on guests(event_id, normalized_search_name);
+                create index if not exists ix_guests_normalized_search_name_trgm on guests using gin (normalized_search_name gin_trgm_ops);
                 create index if not exists ix_guests_event_status_table on guests(event_id, status, table_id);
+                create index if not exists ix_guests_event_public_token on guests(event_id, public_token);
                 create index if not exists ix_guest_aliases_guest_alias on guest_search_aliases(guest_id, normalized_alias);
+                create index if not exists ix_guest_aliases_normalized_alias_trgm on guest_search_aliases using gin (normalized_alias gin_trgm_ops);
                 create index if not exists ix_event_tables_event on event_tables(event_id);
                 create index if not exists ix_floor_plans_event_active on floor_plans(event_id, is_active);
+                create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
+                create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
                 create index if not exists ix_search_metrics_event_created on search_metrics(event_id, created_at);
                 create index if not exists ix_app_users_email on app_users(email);
             """);
@@ -695,10 +848,15 @@ namespace Sassoir.Api.Data
     public sealed class EventStore
     {
         private readonly SassoirDbContext _db;
+        private readonly IMemoryCache _cache;
+        private readonly ILogger<EventStore> _logger;
+        private static readonly TimeSpan PublicCacheTtl = TimeSpan.FromMinutes(5);
 
-        public EventStore(SassoirDbContext db)
+        public EventStore(SassoirDbContext db, IMemoryCache cache, ILogger<EventStore> logger)
         {
             _db = db;
+            _cache = cache;
+            _logger = logger;
             EnsureEventContentSchema();
         }
 
@@ -726,6 +884,43 @@ namespace Sassoir.Api.Data
             return eventEntity is null ? null : ToPublicEventDto(eventEntity);
         }
 
+        public Task<PublicEventDto?> GetPublishedPublicEventAsync(string slug, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var cacheKey = PublicEventCacheKey(normalizedSlug);
+
+            return _cache.GetOrCreateAsync(cacheKey, async entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = PublicCacheTtl;
+                entry.Size = 1;
+                _logger.LogDebug("Public event cache miss for {EventSlug}", normalizedSlug);
+
+                return await _db.Events
+                    .AsNoTracking()
+                    .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published)
+                    .Select(item => new PublicEventDto(
+                        item.Name,
+                        item.Slug,
+                        item.EventType,
+                        item.Subtitle,
+                        item.DateLabel,
+                        item.VenueName,
+                        item.VenueAddress,
+                        new EventTheme(
+                            item.Theme == null || item.Theme.LogoText == string.Empty ? item.Name : item.Theme.LogoText,
+                            item.Theme == null ? string.Empty : item.Theme.HeroText,
+                            item.Theme == null ? "#D8CFBC" : item.Theme.PrimaryColor,
+                            item.Theme == null ? "#565449" : item.Theme.SecondaryColor,
+                            item.Theme == null ? "#FFFBF4" : item.Theme.BackgroundColor,
+                            item.Theme == null ? "#11120D" : item.Theme.TextColor,
+                            item.Theme == null || item.Theme.WelcomeTitle == string.Empty ? "Welcome" : item.Theme.WelcomeTitle,
+                            item.Theme == null || item.Theme.SearchInputLabel == string.Empty ? "Search by name" : item.Theme.SearchInputLabel,
+                            item.Theme == null || item.Theme.SearchPlaceholder == string.Empty ? "Search by name" : item.Theme.SearchPlaceholder,
+                            item.Theme == null ? null : item.Theme.HeroImageUrl)))
+                    .SingleOrDefaultAsync(cancellationToken);
+            });
+        }
+
         public FloorPlanDto? GetPublishedFloorPlan(string slug)
         {
             var eventEntity = _db.Events
@@ -736,6 +931,76 @@ namespace Sassoir.Api.Data
                 .SingleOrDefault(item => item.Slug.ToLower() == slug.ToLower() && item.Status == EventStatus.Published);
 
             return eventEntity is null ? null : ToFloorPlanDto(eventEntity);
+        }
+
+        public Task<FloorPlanDto?> GetPublishedFloorPlanAsync(string slug, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var cacheKey = PublicFloorPlanCacheKey(normalizedSlug);
+
+            return _cache.GetOrCreateAsync(cacheKey, async entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = PublicCacheTtl;
+                entry.Size = 1;
+                _logger.LogDebug("Public floor-plan cache miss for {EventSlug}", normalizedSlug);
+
+                var floorPlan = await _db.FloorPlans
+                    .AsNoTracking()
+                    .Where(item => item.IsActive && item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published)
+                    .OrderByDescending(item => item.Version)
+                    .Select(item => new
+                    {
+                        item.Name,
+                        item.CanvasAspectRatio,
+                        Objects = item.Objects
+                            .Where(floorObject => floorObject.IsVisible)
+                            .OrderBy(floorObject => floorObject.ZIndex)
+                            .Select(floorObject => new
+                            {
+                                floorObject.Id,
+                                floorObject.ObjectType,
+                                floorObject.Label,
+                                floorObject.LinkedTableId,
+                                floorObject.X,
+                                floorObject.Y,
+                                floorObject.Width,
+                                floorObject.Height,
+                                floorObject.Shape,
+                                floorObject.ZIndex,
+                                TableCode = _db.EventTables
+                                    .Where(table => table.Id == floorObject.LinkedTableId)
+                                    .Select(table => table.Code)
+                                    .FirstOrDefault(),
+                                TableName = _db.EventTables
+                                    .Where(table => table.Id == floorObject.LinkedTableId)
+                                    .Select(table => table.Name)
+                                    .FirstOrDefault()
+                            })
+                            .ToArray()
+                    })
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                return floorPlan is null
+                    ? null
+                    : new FloorPlanDto(
+                        floorPlan.Name,
+                        floorPlan.CanvasAspectRatio,
+                        floorPlan.Objects
+                            .Select(item => new FloorPlanObjectDto(
+                                item.Id,
+                                item.ObjectType,
+                                item.Label,
+                                null,
+                                item.TableCode,
+                                item.TableName,
+                                item.X,
+                                item.Y,
+                                item.Width,
+                                item.Height,
+                                item.Shape,
+                                item.ZIndex))
+                            .ToArray());
+            });
         }
 
         public GuestSearchResultDto[] SearchPublicGuests(string slug, string normalizedQuery)
@@ -774,6 +1039,39 @@ namespace Sassoir.Api.Data
             return guests;
         }
 
+        public async Task<GuestSearchResultDto[]> SearchPublicGuestsAsync(string slug, string normalizedQuery, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            if (normalizedQuery.Length < 2) return [];
+
+            var eventId = await _db.Events
+                .AsNoTracking()
+                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published)
+                .Select(item => (Guid?)item.Id)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (eventId is null) return [];
+
+            return await _db.Guests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId && item.Status == GuestStatus.Active)
+                .Where(item =>
+                    item.NormalizedSearchName.StartsWith(normalizedQuery) ||
+                    item.NormalizedSearchName.Contains(normalizedQuery) ||
+                    item.SearchAliases.Any(alias =>
+                        alias.NormalizedAlias.StartsWith(normalizedQuery) ||
+                        alias.NormalizedAlias.Contains(normalizedQuery)))
+                .OrderBy(item => item.NormalizedSearchName == normalizedQuery ? 0 :
+                    item.NormalizedSearchName.StartsWith(normalizedQuery) ? 1 :
+                    item.SearchAliases.Any(alias => alias.NormalizedAlias == normalizedQuery) ? 2 :
+                    item.SearchAliases.Any(alias => alias.NormalizedAlias.StartsWith(normalizedQuery)) ? 3 :
+                    item.NormalizedSearchName.Contains(normalizedQuery) ? 4 : 5)
+                .ThenBy(item => item.DisplayName)
+                .ThenBy(item => item.PublicToken)
+                .Select(item => new GuestSearchResultDto(item.PublicToken, item.DisplayName, string.Empty))
+                .Take(10)
+                .ToArrayAsync(cancellationToken);
+        }
+
         public SeatResultDto? GetPublicGuestSeat(string slug, string publicToken)
         {
             var guest = _db.Guests
@@ -804,6 +1102,61 @@ namespace Sassoir.Api.Data
                 ToPublicEventDto(guest.Event));
         }
 
+        public async Task<PublicSeatResultDto?> GetPublicGuestSeatAsync(string slug, string publicToken, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var guest = await _db.Guests
+                .AsNoTracking()
+                .Where(item => item.PublicToken == publicToken && item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published)
+                .Select(item => new
+                {
+                    item.Id,
+                    item.EventId,
+                    item.TableId,
+                    item.PublicToken,
+                    item.DisplayName,
+                    item.GroupLabel,
+                    item.SeatNumber,
+                    item.Directions,
+                    TableCode = item.Table == null ? string.Empty : item.Table.Code,
+                    TableName = item.Table == null ? string.Empty : item.Table.Name
+                })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (guest is null) return null;
+
+            var companions = guest.TableId is null
+                ? []
+                : await _db.Guests
+                    .AsNoTracking()
+                    .Where(item => item.EventId == guest.EventId && item.Status == GuestStatus.Active && item.Id != guest.Id && item.TableId == guest.TableId)
+                    .OrderBy(item => item.DisplayName)
+                    .Select(item => item.DisplayName)
+                    .Take(20)
+                    .ToArrayAsync(cancellationToken);
+
+            var publicEvent = await GetPublishedPublicEventAsync(normalizedSlug, cancellationToken);
+            if (publicEvent is null) return null;
+
+            var floorPlan = await GetPublishedFloorPlanAsync(normalizedSlug, cancellationToken);
+            var highlightedObjectId = floorPlan?.Objects
+                .Where(item => string.Equals(item.TableCode, guest.TableCode, StringComparison.OrdinalIgnoreCase))
+                .Select(item => item.Id)
+                .FirstOrDefault();
+
+            return new PublicSeatResultDto(
+                guest.PublicToken,
+                guest.DisplayName,
+                guest.GroupLabel,
+                guest.TableCode,
+                guest.TableName,
+                guest.SeatNumber,
+                guest.Directions,
+                companions,
+                publicEvent,
+                floorPlan,
+                highlightedObjectId);
+        }
+
         public GuestFloorPlanDto? GetPublicGuestFloorPlan(string slug, string publicToken)
         {
             var guest = _db.Guests
@@ -828,6 +1181,14 @@ namespace Sassoir.Api.Data
                 .FirstOrDefault() ?? $"table-{guest.TableId}";
 
             return new GuestFloorPlanDto(ToFloorPlanDto(eventEntity), highlightedId);
+        }
+
+        public async Task<GuestFloorPlanDto?> GetPublicGuestFloorPlanAsync(string slug, string publicToken, CancellationToken cancellationToken)
+        {
+            var seat = await GetPublicGuestSeatAsync(slug, publicToken, cancellationToken);
+            if (seat?.FloorPlan is null) return null;
+
+            return new GuestFloorPlanDto(seat.FloorPlan, seat.HighlightedObjectId ?? string.Empty);
         }
 
         public EventDetails? GetEvent(Guid id)
@@ -864,6 +1225,56 @@ namespace Sassoir.Api.Data
                     item.Guests.Count(guest => guest.Status != GuestStatus.Archived),
                     item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)))
                 .ToArray();
+        }
+
+        public async Task<PaginatedResponse<AdminEventDto>> GetAdminEventsPageAsync(string? search, string? status, int? page, int? pageSize, CancellationToken cancellationToken)
+        {
+            var paging = NormalizePaging(page, pageSize);
+            var normalizedSearch = SearchNormalizer.Normalize(search);
+            var query = _db.Events.AsNoTracking();
+
+            if (!string.IsNullOrWhiteSpace(normalizedSearch))
+            {
+                query = query.Where(item =>
+                    item.Name.ToLower().Contains(normalizedSearch) ||
+                    item.Slug.ToLower().Contains(normalizedSearch) ||
+                    item.VenueName.ToLower().Contains(normalizedSearch));
+            }
+
+            if (Enum.TryParse<EventStatus>(status, true, out var parsedStatus))
+            {
+                query = query.Where(item => item.Status == parsedStatus);
+            }
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderByDescending(item => item.CreatedAt)
+                .Skip((paging.Page - 1) * paging.PageSize)
+                .Take(paging.PageSize)
+                .Select(item => new AdminEventDto(
+                    item.Id,
+                    item.Name,
+                    item.Slug,
+                    item.EventType,
+                    item.Subtitle,
+                    item.DateLabel,
+                    item.VenueName,
+                    item.VenueAddress,
+                    item.Status,
+                    item.Theme == null ? string.Empty : item.Theme.HeroText,
+                    item.Theme == null ? "#D8CFBC" : item.Theme.PrimaryColor,
+                    item.Theme == null ? "#565449" : item.Theme.SecondaryColor,
+                    item.Theme == null ? "#FFFBF4" : item.Theme.BackgroundColor,
+                    item.Theme == null ? "#11120D" : item.Theme.TextColor,
+                    item.Theme == null || item.Theme.WelcomeTitle == string.Empty ? $"Welcome to {item.Name}" : item.Theme.WelcomeTitle,
+                    item.Theme == null || item.Theme.SearchInputLabel == string.Empty ? "Search by name" : item.Theme.SearchInputLabel,
+                    item.Theme == null || item.Theme.SearchPlaceholder == string.Empty ? "Search by name" : item.Theme.SearchPlaceholder,
+                    item.Theme == null ? null : item.Theme.HeroImageUrl,
+                    item.Guests.Count(guest => guest.Status != GuestStatus.Archived),
+                    item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<AdminEventDto>(items, paging.Page, paging.PageSize, totalCount);
         }
 
         public (EventDetails? Event, string? Error) CreateEvent(AdminEventUpsertRequest request)
@@ -924,6 +1335,7 @@ namespace Sassoir.Api.Data
 
             _db.Events.Add(eventEntity);
             _db.SaveChanges();
+            InvalidatePublicCache(slug);
             return (GetEvent(eventEntity.Id), null);
         }
 
@@ -940,6 +1352,7 @@ namespace Sassoir.Api.Data
                 return (null, "An event with this slug already exists.");
             }
 
+            var previousSlug = eventEntity.Slug;
             eventEntity.Name = request.Name.Trim();
             eventEntity.Slug = slug;
             eventEntity.EventType = NormalizeEventType(request.EventType);
@@ -966,6 +1379,8 @@ namespace Sassoir.Api.Data
             eventEntity.Theme.UpdatedAt = DateTimeOffset.UtcNow;
 
             _db.SaveChanges();
+            InvalidatePublicCache(previousSlug);
+            InvalidatePublicCache(slug);
             return (GetEvent(id), null);
         }
 
@@ -976,6 +1391,7 @@ namespace Sassoir.Api.Data
 
             _db.Events.Remove(eventEntity);
             _db.SaveChanges();
+            InvalidatePublicCache(eventEntity.Slug);
             return true;
         }
 
@@ -989,6 +1405,7 @@ namespace Sassoir.Api.Data
             eventEntity.PublishedAt = status == EventStatus.Published ? DateTimeOffset.UtcNow : null;
             eventEntity.UpdatedAt = DateTimeOffset.UtcNow;
             _db.SaveChanges();
+            InvalidatePublicCache(eventEntity.Slug);
 
             return GetEvent(id);
         }
@@ -1013,6 +1430,62 @@ namespace Sassoir.Api.Data
             return guests
                 .Select(item => ToAdminGuestDto(item, duplicateKeys.Contains(DuplicateKey(item))))
                 .ToArray();
+        }
+
+        public async Task<PaginatedResponse<AdminGuestDto>> GetAdminGuestsPageAsync(Guid eventId, string? search, string? status, string? tableId, int? page, int? pageSize, CancellationToken cancellationToken)
+        {
+            var paging = NormalizePaging(page, pageSize);
+            var normalizedSearch = SearchNormalizer.Normalize(search);
+            var query = _db.Guests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId);
+
+            if (!string.IsNullOrWhiteSpace(normalizedSearch))
+            {
+                query = query.Where(item =>
+                    item.NormalizedSearchName.Contains(normalizedSearch) ||
+                    item.FirstName.ToLower().Contains(normalizedSearch) ||
+                    item.LastName.ToLower().Contains(normalizedSearch) ||
+                    item.DisplayName.ToLower().Contains(normalizedSearch) ||
+                    (item.Notes != null && item.Notes.ToLower().Contains(normalizedSearch)) ||
+                    (item.Table != null && (item.Table.Code.ToLower().Contains(normalizedSearch) || item.Table.Name.ToLower().Contains(normalizedSearch))));
+            }
+
+            if (Enum.TryParse<GuestStatus>(status, true, out var parsedStatus))
+            {
+                query = query.Where(item => item.Status == parsedStatus);
+            }
+            else if (string.Equals(status, "Unassigned", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(item => item.TableId == null && item.Status != GuestStatus.Archived);
+            }
+
+            if (Guid.TryParse(tableId, out var parsedTableId))
+            {
+                query = query.Where(item => item.TableId == parsedTableId);
+            }
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderBy(item => item.DisplayName)
+                .ThenBy(item => item.Id)
+                .Skip((paging.Page - 1) * paging.PageSize)
+                .Take(paging.PageSize)
+                .Select(item => new AdminGuestDto(
+                    item.Id,
+                    item.FirstName,
+                    item.LastName,
+                    item.DisplayName,
+                    item.Notes ?? string.Empty,
+                    item.PersonCount < 1 ? 1 : item.PersonCount,
+                    item.TableId,
+                    item.Table == null ? string.Empty : item.Table.Code,
+                    item.Table == null ? string.Empty : item.Table.Name,
+                    item.Status,
+                    false))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<AdminGuestDto>(items, paging.Page, paging.PageSize, totalCount);
         }
 
         public (AdminGuestDto? Guest, string? Error) CreateGuest(Guid eventId, AdminGuestCreateRequest request)
@@ -1231,6 +1704,45 @@ namespace Sassoir.Api.Data
                 .ToArray();
         }
 
+        public async Task<PaginatedResponse<AdminTableDto>> GetAdminTablesPageAsync(Guid eventId, string? search, int? page, int? pageSize, CancellationToken cancellationToken)
+        {
+            var paging = NormalizePaging(page, pageSize);
+            var normalizedSearch = SearchNormalizer.Normalize(search);
+            var query = _db.EventTables
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId);
+
+            if (!string.IsNullOrWhiteSpace(normalizedSearch))
+            {
+                query = query.Where(item =>
+                    item.Code.ToLower().Contains(normalizedSearch) ||
+                    item.Name.ToLower().Contains(normalizedSearch) ||
+                    (item.Notes != null && item.Notes.ToLower().Contains(normalizedSearch)));
+            }
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderBy(item => item.Code)
+                .ThenBy(item => item.Id)
+                .Skip((paging.Page - 1) * paging.PageSize)
+                .Take(paging.PageSize)
+                .Select(item => new AdminTableDto(
+                    item.Id,
+                    item.Name,
+                    item.Code,
+                    item.Capacity,
+                    item.Guests
+                        .Where(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
+                        .Sum(guest => guest.PersonCount < 1 ? 1 : guest.PersonCount),
+                    item.Shape.ToLower() == "square" ? "square" :
+                        item.Shape.ToLower() == "rectangle" ? "rectangle" :
+                        item.Shape.ToLower() == "tear" ? "tear" : "round",
+                    item.Notes ?? string.Empty))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<AdminTableDto>(items, paging.Page, paging.PageSize, totalCount);
+        }
+
         public (AdminTableDto? Table, string? Error) CreateTable(Guid eventId, AdminTableCreateRequest request)
         {
             if (!_db.Events.Any(item => item.Id == eventId)) return (null, "not-found");
@@ -1274,6 +1786,7 @@ namespace Sassoir.Api.Data
             });
 
             _db.SaveChanges();
+            InvalidatePublicCache(eventId);
             return (ToAdminTableDto(table), null);
         }
 
@@ -1316,6 +1829,7 @@ namespace Sassoir.Api.Data
             }
 
             _db.SaveChanges();
+            InvalidatePublicCache(eventId);
             return (ToAdminTableDto(table), null);
         }
 
@@ -1335,6 +1849,7 @@ namespace Sassoir.Api.Data
             _db.FloorPlanObjects.RemoveRange(floorObjects);
             _db.EventTables.Remove(table);
             _db.SaveChanges();
+            InvalidatePublicCache(eventId);
             return true;
         }
 
@@ -1367,6 +1882,7 @@ namespace Sassoir.Api.Data
 
             floorPlan.Version += 1;
             _db.SaveChanges();
+            InvalidatePublicCache(eventId);
             return GetEvent(eventId)?.FloorPlan;
         }
 
@@ -1388,6 +1904,28 @@ namespace Sassoir.Api.Data
             _db.SaveChanges();
         }
 
+        public async Task<bool> SaveMessageAsync(string slug, string publicToken, string message, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var guest = await _db.Guests
+                .AsNoTracking()
+                .Where(item => item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.PublicToken == publicToken)
+                .Select(item => new { item.Id, item.EventId })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (guest is null) return false;
+
+            _db.GuestMessages.Add(new GuestMessageEntity
+            {
+                Id = Guid.NewGuid(),
+                EventId = guest.EventId,
+                GuestId = guest.Id,
+                Message = message,
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await _db.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+
         public IReadOnlyList<AdminGuestMessageDto> GetGuestMessages(Guid eventId)
         {
             return _db.GuestMessages
@@ -1401,6 +1939,29 @@ namespace Sassoir.Api.Data
                     item.Message,
                     item.CreatedAt))
                 .ToArray();
+        }
+
+        public async Task<PaginatedResponse<AdminGuestMessageDto>> GetGuestMessagesPageAsync(Guid eventId, int? page, int? pageSize, CancellationToken cancellationToken)
+        {
+            var paging = NormalizePaging(page, pageSize);
+            var query = _db.GuestMessages
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId);
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderByDescending(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .Skip((paging.Page - 1) * paging.PageSize)
+                .Take(paging.PageSize)
+                .Select(item => new AdminGuestMessageDto(
+                    item.Id,
+                    item.Guest == null ? "Guest" : item.Guest.DisplayName,
+                    item.Message,
+                    item.CreatedAt))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<AdminGuestMessageDto>(items, paging.Page, paging.PageSize, totalCount);
         }
 
         public void TrackSearch(string slug, string normalizedQuery, bool successful)
@@ -1421,6 +1982,54 @@ namespace Sassoir.Api.Data
             });
             _db.SaveChanges();
         }
+
+        public async Task TrackSearchAsync(string slug, string normalizedQuery, bool successful, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var eventId = await _db.Events
+                .AsNoTracking()
+                .Where(item => item.Slug == normalizedSlug)
+                .Select(item => (Guid?)item.Id)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (eventId is null) return;
+
+            _db.SearchMetrics.Add(new SearchMetricEntity
+            {
+                Id = Guid.NewGuid(),
+                EventId = eventId.Value,
+                NormalizedQuery = normalizedQuery,
+                Successful = successful,
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        private void InvalidatePublicCache(Guid eventId)
+        {
+            var slug = _db.Events
+                .AsNoTracking()
+                .Where(item => item.Id == eventId)
+                .Select(item => item.Slug)
+                .SingleOrDefault();
+            if (!string.IsNullOrWhiteSpace(slug))
+            {
+                InvalidatePublicCache(slug);
+            }
+        }
+
+        private void InvalidatePublicCache(string slug)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            _cache.Remove(PublicEventCacheKey(normalizedSlug));
+            _cache.Remove(PublicFloorPlanCacheKey(normalizedSlug));
+            _logger.LogInformation("Invalidated public event cache for {EventSlug}", normalizedSlug);
+        }
+
+        private static string PublicEventCacheKey(string slug) => $"public:event:{slug}";
+
+        private static string PublicFloorPlanCacheKey(string slug) => $"public:floor-plan:{slug}";
+
+        private static string NormalizeSlug(string slug) => slug.Trim().ToLowerInvariant();
 
         private IQueryable<EventEntity> EventQuery()
         {
@@ -1462,6 +2071,13 @@ namespace Sassoir.Api.Data
                   add column if not exists notes text;
 
                 create index if not exists ix_guests_event_status_table on guests(event_id, status, table_id);
+                create extension if not exists pg_trgm;
+                create index if not exists ix_guests_event_search on guests(event_id, normalized_search_name);
+                create index if not exists ix_guests_normalized_search_name_trgm on guests using gin (normalized_search_name gin_trgm_ops);
+                create index if not exists ix_guests_event_public_token on guests(event_id, public_token);
+                create index if not exists ix_guest_aliases_normalized_alias_trgm on guest_search_aliases using gin (normalized_alias gin_trgm_ops);
+                create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
+                create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
             """);
         }
 
@@ -1785,6 +2401,11 @@ namespace Sassoir.Api.Data
         private static decimal Clamp01(decimal value)
         {
             return Math.Clamp(value, 0m, 1m);
+        }
+
+        private static (int Page, int PageSize) NormalizePaging(int? page, int? pageSize)
+        {
+            return (Math.Max(1, page ?? 1), Math.Clamp(pageSize ?? 25, 1, 100));
         }
     }
 
@@ -2407,11 +3028,26 @@ namespace Sassoir.Api.Models
         string[] Companions,
         PublicEventDto Event);
 
+    public sealed record PublicSeatResultDto(
+        string PublicToken,
+        string DisplayName,
+        string GroupLabel,
+        string TableCode,
+        string TableName,
+        string? SeatNumber,
+        string Directions,
+        string[] Companions,
+        PublicEventDto Event,
+        FloorPlanDto? FloorPlan,
+        string? HighlightedObjectId);
+
     public sealed record GuestFloorPlanDto(FloorPlanDto FloorPlan, string HighlightedObjectId);
 
     public sealed record GuestMessageRequest(string Message);
 
     public sealed record AdminGuestMessageDto(Guid Id, string GuestName, string Message, DateTimeOffset CreatedAt);
+
+    public sealed record PaginatedResponse<T>(IReadOnlyList<T> Items, int Page, int PageSize, int TotalCount);
 
     public sealed record GuestMessage(string EventSlug, string PublicToken, string Message, DateTimeOffset CreatedAt);
 

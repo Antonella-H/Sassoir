@@ -37,8 +37,16 @@ Auth__AccessTokenMinutes=30
 Auth__SeedAdminEmail=YOUR_ADMIN_EMAIL
 Auth__SeedAdminPassword=YOUR_FIRST_ADMIN_PASSWORD
 Cors__AllowedOrigins=https://sassoir.com,https://www.sassoir.com
+Database__MaxPoolSize=20
+Database__CommandTimeoutSeconds=30
+RateLimiting__PublicEventPerMinute=60
+RateLimiting__GuestSearchPerMinute=30
+RateLimiting__SeatResultPerMinute=30
+RateLimiting__GuestMessagePerMinute=5
 Uploads__RootPath=/var/data/uploads
 ```
+
+The API also includes `https://sassoir.com` and `https://www.sassoir.com` as built-in allowed origins, but keep `Cors__AllowedOrigins` set on Render so any future frontend domain changes are explicit.
 
 If you do not add a persistent disk yet, leave `Uploads__RootPath` unset. Uploaded images may be lost after redeploys or restarts without persistent storage.
 
@@ -46,6 +54,14 @@ After the API deploys, test:
 
 ```text
 https://api.sassoir.com/api/health
+https://api.sassoir.com/api/health/live
+https://api.sassoir.com/api/health/ready
+```
+
+Apply the production performance indexes to PostgreSQL after the first deploy:
+
+```text
+database/migrations/20260717_performance_indexes.sql
 ```
 
 ## Frontend Service
