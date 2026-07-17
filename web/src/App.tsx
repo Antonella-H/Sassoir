@@ -151,6 +151,7 @@ type PaginatedResponse<T> = {
 
 type AdminEventCacheEntry = {
   guests?: AdminGuest[];
+  allDesignGuests?: AdminGuest[];
   tables?: AdminTable[];
   floorObjects?: FloorObject[];
 };
@@ -218,6 +219,36 @@ async function getAdminGuestPage(eventId: string, token: string, params: { page:
 
   adminGuestPageRequests.set(cacheKey, request);
   return request;
+}
+
+async function getAllAdminDesignGuests(eventId: string, token: string, options?: { force?: boolean }) {
+  const cached = adminEventCache.get(eventId);
+  if (!options?.force && cached?.allDesignGuests) return cached.allDesignGuests;
+
+  const pageSize = 100;
+  const firstPage = await getAdminGuestPage(eventId, token, {
+    page: 1,
+    pageSize,
+    search: "",
+    status: "All",
+    tableId: "All",
+  }, options);
+
+  const totalPages = Math.max(1, Math.ceil(firstPage.totalCount / pageSize));
+  const remainingPages = totalPages <= 1
+    ? []
+    : await Promise.all(Array.from({ length: totalPages - 1 }, (_, index) => getAdminGuestPage(eventId, token, {
+      page: index + 2,
+      pageSize,
+      search: "",
+      status: "All",
+      tableId: "All",
+    }, options)));
+
+  const guests = [firstPage, ...remainingPages].flatMap((page) => page.items);
+  const previous = adminEventCache.get(eventId) ?? {};
+  adminEventCache.set(eventId, { ...previous, guests, allDesignGuests: guests });
+  return guests;
 }
 
 async function getAdminTables(eventId: string, token: string, options?: { force?: boolean }) {
@@ -292,22 +323,16 @@ async function getAdminFloorPlan(eventId: string, token: string, options?: { for
 
   const request = Promise.all([
     getAdminTables(eventId, token, options),
-    getAdminGuestPage(eventId, token, {
-      page: 1,
-      pageSize: 20,
-      search: "",
-      status: "All",
-      tableId: "All",
-    }, options),
+    getAllAdminDesignGuests(eventId, token, options),
     fetch(apiUrl(`/api/admin/events/${eventId}/floor-plan`), { headers: { Authorization: `Bearer ${token}` } }),
-  ]).then(async ([tables, guestPage, floorPlanResponse]) => {
+  ]).then(async ([tables, guests, floorPlanResponse]) => {
     if (!floorPlanResponse.ok) throw new Error(await readError(floorPlanResponse));
 
     const floorPlanPayload = await floorPlanResponse.json();
     const floorObjects = withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), tables);
     const previous = adminEventCache.get(eventId) ?? {};
-    adminEventCache.set(eventId, { ...previous, guests: guestPage.items, tables, floorObjects });
-    return { guests: guestPage.items, tables, floorObjects };
+    adminEventCache.set(eventId, { ...previous, guests, allDesignGuests: guests, tables, floorObjects });
+    return { guests, tables, floorObjects };
   }).finally(() => {
     adminFloorPlanRequests.delete(requestKey);
   });
