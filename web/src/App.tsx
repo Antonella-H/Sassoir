@@ -142,14 +142,81 @@ type FloorPlanCacheEntry = GuestListCacheEntry & {
   floorObjects: FloorObject[];
 };
 
-const guestListCache = new globalThis.Map<string, GuestListCacheEntry>();
-const floorPlanCache = new globalThis.Map<string, FloorPlanCacheEntry>();
+type AdminEventCacheEntry = {
+  guests?: AdminGuest[];
+  tables?: AdminTable[];
+  floorObjects?: FloorObject[];
+};
+
+const adminEventCache = new globalThis.Map<string, AdminEventCacheEntry>();
+const adminGuestListRequests = new globalThis.Map<string, Promise<GuestListCacheEntry>>();
+const adminFloorPlanRequests = new globalThis.Map<string, Promise<FloorPlanCacheEntry>>();
 const publicEventCache = new globalThis.Map<string, { event: PublicEvent; floorObjects: FloorObject[] }>();
 const minimumGuestSearchCharacters = 2;
 
 function clearEventAdminCaches(eventId: string) {
-  guestListCache.delete(eventId);
-  floorPlanCache.delete(eventId);
+  adminEventCache.delete(eventId);
+  adminGuestListRequests.delete(eventId);
+  adminFloorPlanRequests.delete(eventId);
+}
+
+async function getAdminGuestList(eventId: string, token: string, options?: { force?: boolean }) {
+  const cached = adminEventCache.get(eventId);
+  if (!options?.force && cached?.guests && cached.tables) {
+    return { guests: cached.guests, tables: cached.tables };
+  }
+
+  const requestKey = `${eventId}:${token}`;
+  const pending = adminGuestListRequests.get(requestKey);
+  if (!options?.force && pending) return pending;
+
+  const request = Promise.all([
+    fetch(apiUrl(`/api/admin/events/${eventId}/guests`), { headers: { Authorization: `Bearer ${token}` } }),
+    fetch(apiUrl(`/api/admin/events/${eventId}/tables`), { headers: { Authorization: `Bearer ${token}` } }),
+  ]).then(async ([guestResponse, tableResponse]) => {
+    if (!guestResponse.ok) throw new Error(await readError(guestResponse));
+    if (!tableResponse.ok) throw new Error(await readError(tableResponse));
+
+    const guests = (await guestResponse.json()) as AdminGuest[];
+    const tables = (await tableResponse.json()) as AdminTable[];
+    const previous = adminEventCache.get(eventId) ?? {};
+    adminEventCache.set(eventId, { ...previous, guests, tables });
+    return { guests, tables };
+  }).finally(() => {
+    adminGuestListRequests.delete(requestKey);
+  });
+
+  adminGuestListRequests.set(requestKey, request);
+  return request;
+}
+
+async function getAdminFloorPlan(eventId: string, token: string, options?: { force?: boolean }) {
+  const cached = adminEventCache.get(eventId);
+  if (!options?.force && cached?.guests && cached.tables && cached.floorObjects) {
+    return { guests: cached.guests, tables: cached.tables, floorObjects: cached.floorObjects };
+  }
+
+  const requestKey = `${eventId}:${token}`;
+  const pending = adminFloorPlanRequests.get(requestKey);
+  if (!options?.force && pending) return pending;
+
+  const request = Promise.all([
+    getAdminGuestList(eventId, token, options),
+    fetch(apiUrl(`/api/admin/events/${eventId}/floor-plan`), { headers: { Authorization: `Bearer ${token}` } }),
+  ]).then(async ([guestList, floorPlanResponse]) => {
+    if (!floorPlanResponse.ok) throw new Error(await readError(floorPlanResponse));
+
+    const floorPlanPayload = await floorPlanResponse.json();
+    const floorObjects = withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), guestList.tables);
+    const previous = adminEventCache.get(eventId) ?? {};
+    adminEventCache.set(eventId, { ...previous, guests: guestList.guests, tables: guestList.tables, floorObjects });
+    return { guests: guestList.guests, tables: guestList.tables, floorObjects };
+  }).finally(() => {
+    adminFloorPlanRequests.delete(requestKey);
+  });
+
+  adminFloorPlanRequests.set(requestKey, request);
+  return request;
 }
 
 type PublicEvent = {
@@ -2028,31 +2095,13 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const loadGuests = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
 
-    const cached = guestListCache.get(event.id);
-    if (cached && !options?.force) {
-      setGuests(cached.guests);
-      setTables(cached.tables);
-      return;
-    }
-
     setLoading(true);
     setError("");
 
     try {
-      const [guestResponse, tableResponse] = await Promise.all([
-        fetch(apiUrl(`/api/admin/events/${event.id}/guests`), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl(`/api/admin/events/${event.id}/tables`), { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-
-      if (!guestResponse.ok) throw new Error(await readError(guestResponse));
-      if (!tableResponse.ok) throw new Error(await readError(tableResponse));
-
-      const guestPayload = (await guestResponse.json()) as AdminGuest[];
-      const tablePayload = (await tableResponse.json()) as AdminTable[];
-
-      setGuests(guestPayload);
-      setTables(tablePayload);
-      guestListCache.set(event.id, { guests: guestPayload, tables: tablePayload });
+      const payload = await getAdminGuestList(event.id, token, options);
+      setGuests(payload.guests);
+      setTables(payload.tables);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load guests.");
     } finally {
@@ -2836,39 +2885,14 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   const loadFloorPlan = useCallback(async (options?: { force?: boolean }) => {
     if (!token) return;
 
-    const cached = floorPlanCache.get(event.id);
-    if (cached && !options?.force) {
-      setTables(cached.tables);
-      setGuests(cached.guests);
-      setFloorObjects(cached.floorObjects);
-      return;
-    }
-
     setLoading(true);
     setError("");
 
     try {
-      const [tableResponse, guestResponse, floorPlanResponse] = await Promise.all([
-        fetch(apiUrl(`/api/admin/events/${event.id}/tables`), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl(`/api/admin/events/${event.id}/guests`), { headers: { Authorization: `Bearer ${token}` } }),
-        fetch(apiUrl(`/api/admin/events/${event.id}/floor-plan`), { headers: { Authorization: `Bearer ${token}` } }),
-      ]);
-
-      if (!tableResponse.ok) throw new Error(await readError(tableResponse));
-      if (!guestResponse.ok) throw new Error(await readError(guestResponse));
-      if (!floorPlanResponse.ok) throw new Error(await readError(floorPlanResponse));
-
-      const tablePayload = (await tableResponse.json()) as AdminTable[];
-      const guestPayload = (await guestResponse.json()) as AdminGuest[];
-      const floorPlanPayload = await floorPlanResponse.json();
-
-      const mergedObjects = withTableFloorObjects(toFloorObjects(floorPlanPayload?.objects), tablePayload);
-
-      setTables(tablePayload);
-      setGuests(guestPayload);
-      setFloorObjects(mergedObjects);
-      guestListCache.set(event.id, { guests: guestPayload, tables: tablePayload });
-      floorPlanCache.set(event.id, { tables: tablePayload, guests: guestPayload, floorObjects: mergedObjects });
+      const payload = await getAdminFloorPlan(event.id, token, options);
+      setTables(payload.tables);
+      setGuests(payload.guests);
+      setFloorObjects(payload.floorObjects);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load floor plan.");
     } finally {
@@ -3121,7 +3145,12 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       const payload = await response.json();
       const mergedObjects = withTableFloorObjects(toFloorObjects(payload?.objects), tables);
       setFloorObjects(mergedObjects);
-      floorPlanCache.set(event.id, { tables, guests, floorObjects: mergedObjects });
+      adminEventCache.set(event.id, {
+        ...(adminEventCache.get(event.id) ?? {}),
+        tables,
+        guests,
+        floorObjects: mergedObjects,
+      });
       setWarning("Floor plan saved.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Could not save floor plan.");

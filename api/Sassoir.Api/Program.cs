@@ -659,7 +659,6 @@ namespace Sassoir.Api.Data
         {
             db.Database.ExecuteSqlRaw("""
                 create extension if not exists pgcrypto;
-                create extension if not exists pg_trgm;
 
                 create table if not exists organizations (
                   id uuid primary key default gen_random_uuid(),
@@ -830,11 +829,9 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_events_organization_id on events(organization_id);
                 create index if not exists ix_events_slug_status on events(slug, status);
                 create index if not exists ix_guests_event_search on guests(event_id, normalized_search_name);
-                create index if not exists ix_guests_normalized_search_name_trgm on guests using gin (normalized_search_name gin_trgm_ops);
                 create index if not exists ix_guests_event_status_table on guests(event_id, status, table_id);
                 create index if not exists ix_guests_event_public_token on guests(event_id, public_token);
                 create index if not exists ix_guest_aliases_guest_alias on guest_search_aliases(guest_id, normalized_alias);
-                create index if not exists ix_guest_aliases_normalized_alias_trgm on guest_search_aliases using gin (normalized_alias gin_trgm_ops);
                 create index if not exists ix_event_tables_event on event_tables(event_id);
                 create index if not exists ix_floor_plans_event_active on floor_plans(event_id, is_active);
                 create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
@@ -857,7 +854,6 @@ namespace Sassoir.Api.Data
             _db = db;
             _cache = cache;
             _logger = logger;
-            EnsureEventContentSchema();
         }
 
         public IReadOnlyList<EventDetails> Events => EventQuery()
@@ -2043,42 +2039,6 @@ namespace Sassoir.Api.Data
                     .ThenInclude(item => item.SearchAliases)
                 .Include(item => item.FloorPlans)
                     .ThenInclude(item => item.Objects);
-        }
-
-        private void EnsureEventContentSchema()
-        {
-            _db.Database.ExecuteSqlRaw("""
-                alter table events
-                  add column if not exists event_type text not null default 'Wedding';
-
-                alter table event_themes
-                  alter column primary_color set default '#D8CFBC',
-                  alter column background_color set default '#FFFBF4',
-                  alter column text_color set default '#11120D',
-                  add column if not exists secondary_color text not null default '#565449',
-                  add column if not exists welcome_title text not null default '',
-                  add column if not exists search_input_label text not null default 'Search by name',
-                  add column if not exists search_placeholder text not null default 'Search by name';
-
-                alter table guests
-                  add column if not exists first_name text not null default '',
-                  add column if not exists last_name text not null default '',
-                  add column if not exists notes text,
-                  add column if not exists person_count integer not null default 1,
-                  add column if not exists status text not null default 'Active';
-
-                alter table event_tables
-                  add column if not exists notes text;
-
-                create index if not exists ix_guests_event_status_table on guests(event_id, status, table_id);
-                create extension if not exists pg_trgm;
-                create index if not exists ix_guests_event_search on guests(event_id, normalized_search_name);
-                create index if not exists ix_guests_normalized_search_name_trgm on guests using gin (normalized_search_name gin_trgm_ops);
-                create index if not exists ix_guests_event_public_token on guests(event_id, public_token);
-                create index if not exists ix_guest_aliases_normalized_alias_trgm on guest_search_aliases using gin (normalized_alias gin_trgm_ops);
-                create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
-                create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
-            """);
         }
 
         private OrganizationEntity GetOrCreateDemoOrganization()
