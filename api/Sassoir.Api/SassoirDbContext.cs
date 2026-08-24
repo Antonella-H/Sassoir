@@ -48,6 +48,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.DateLabel).HasColumnName("date_label");
             entity.Property(item => item.VenueName).HasColumnName("venue_name");
             entity.Property(item => item.VenueAddress).HasColumnName("venue_address");
+            entity.Property(item => item.SeatingAssignmentMode).HasColumnName("seating_assignment_mode");
             entity.Property(item => item.Status).HasColumnName("status").HasConversion<string>();
             entity.Property(item => item.IsPublic).HasColumnName("is_public");
             entity.Property(item => item.PublishedAt).HasColumnName("published_at");
@@ -261,6 +262,7 @@ public sealed class EventEntity
     public string DateLabel { get; set; } = string.Empty;
     public string VenueName { get; set; } = string.Empty;
     public string VenueAddress { get; set; } = string.Empty;
+    public string SeatingAssignmentMode { get; set; } = "table";
     public EventStatus Status { get; set; }
     public bool IsPublic { get; set; }
     public DateTimeOffset? PublishedAt { get; set; }

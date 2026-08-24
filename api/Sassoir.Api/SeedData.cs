@@ -11,6 +11,7 @@ public static class SeedData
             "Lichaa & Roula's Wedding",
             "lichaa-and-roula",
             "Wedding",
+            "seat",
             "Together with their families, they welcome you to an evening of love, dinner, and dancing.",
             "Saturday, August 22",
             "The Olive Garden Venue",
@@ -51,4 +52,3 @@ public static class SeedData
             ])
     ];
 }
-

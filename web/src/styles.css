@@ -2787,6 +2787,64 @@ p {
   background: #faf8f2;
 }
 
+.seat-assignment-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #dedbd5;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.seat-assignment-card strong,
+.seat-assignment-card span {
+  display: block;
+}
+
+.seat-assignment-card span {
+  margin-top: 3px;
+  color: #666;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.seat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.seat-chip {
+  min-height: 54px;
+  padding: 7px 5px;
+  border: 1px solid #dedbd5;
+  border-radius: 8px;
+  background: #fff;
+  color: #111;
+  text-align: center;
+  cursor: pointer;
+}
+
+.seat-chip strong {
+  font-size: 14px;
+}
+
+.seat-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+.seat-chip.active {
+  border-color: #111;
+  box-shadow: 0 0 0 2px rgba(17, 17, 17, 0.1);
+}
+
+.seat-chip.occupied {
+  background: #f5f3ee;
+}
+
 .designer-warning {
   margin: 0;
   padding: 12px;

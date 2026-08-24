@@ -104,6 +104,7 @@ type AdminGuest = {
   tableId?: string | null;
   tableCode: string;
   tableName: string;
+  seatNumber?: string | null;
   status: "Active" | "Cancelled" | "CheckedIn" | "Archived";
   isDuplicate: boolean;
 };
@@ -376,6 +377,7 @@ type AdminEvent = {
   name: string;
   slug: string;
   eventType: string;
+  seatingAssignmentMode: "table" | "seat";
   subtitle: string;
   dateLabel: string;
   venueName: string;
@@ -411,6 +413,7 @@ type AdminEventDraft = {
   name: string;
   slug: string;
   eventType: string;
+  seatingAssignmentMode: "table" | "seat";
   subtitle: string;
   dateLabel: string;
   venueName: string;
@@ -434,6 +437,7 @@ type AdminGuestDraft = {
   notes: string;
   personCount: number;
   tableId: string;
+  seatNumber: string;
   status: AdminGuest["status"];
 };
 
@@ -506,6 +510,7 @@ const fallbackAdminEvents: AdminEvent[] = [
     name: fallbackEvent.name,
     slug: fallbackEvent.slug,
     eventType: fallbackEvent.eventType,
+    seatingAssignmentMode: "seat",
     subtitle: fallbackEvent.subtitle,
     dateLabel: fallbackEvent.dateLabel,
     venueName: fallbackEvent.venueName,
@@ -548,6 +553,10 @@ const fallbackFloorObjects: FloorObject[] = [
 
 const eventTypeOptions = ["Wedding", "Corporate", "Gala", "Conference", "Birthday", "Private Dinner", "Other"];
 const eventStatusOptions = ["Draft", "Published", "Archived"];
+const seatingAssignmentModeOptions = [
+  { value: "table", label: "By table" },
+  { value: "seat", label: "By seat" },
+] as const;
 const tableShapeOptions: Array<{ value: AdminTable["shape"]; label: string }> = [
   { value: "round", label: "Round" },
   { value: "square", label: "Square" },
@@ -571,6 +580,7 @@ const eventFormSections: EventSectionDefinition[] = [
         fields: [
           { label: "Event Title", draftField: "name", placeholder: "Lichaa & Roula's Wedding" },
           { label: "Event Type", draftField: "eventType", type: "select", options: eventTypeOptions },
+          { label: "Seating Assignment", draftField: "seatingAssignmentMode", type: "select", options: seatingAssignmentModeOptions.map((option) => option.value) },
           { label: "Event Status", draftField: "status", type: "select", options: eventStatusOptions },
         ],
       },
@@ -2094,6 +2104,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       name: event.name,
       slug: event.slug,
       eventType: event.eventType,
+      seatingAssignmentMode: normalizeSeatingAssignmentMode(event.seatingAssignmentMode),
       subtitle: event.subtitle,
       dateLabel: event.dateLabel,
       venueName: event.venueName,
@@ -2145,6 +2156,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         name: draft.name,
         slug: draft.slug,
         eventType: draft.eventType,
+        seatingAssignmentMode: draft.seatingAssignmentMode,
         subtitle: draft.subtitle,
         dateLabel: draft.dateLabel,
         venueName: draft.venueName,
@@ -2286,6 +2298,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       name: routedEvent.name,
       slug: routedEvent.slug,
       eventType: routedEvent.eventType,
+      seatingAssignmentMode: normalizeSeatingAssignmentMode(routedEvent.seatingAssignmentMode),
       subtitle: routedEvent.subtitle,
       dateLabel: routedEvent.dateLabel,
       venueName: routedEvent.venueName,
@@ -2791,6 +2804,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
         body: JSON.stringify({
           ...draft,
           tableId: draft.tableId || null,
+          seatNumber: seatBasedEvent && draft.tableId ? draft.seatNumber || null : null,
         }),
       });
 
@@ -3008,6 +3022,13 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const paginationStart = Math.max(1, currentGuestPage - 2);
   const paginationEnd = Math.min(totalGuestPages, currentGuestPage + 2);
   const paginationPages = Array.from({ length: paginationEnd - paginationStart + 1 }, (_, index) => paginationStart + index);
+  const seatBasedEvent = isSeatBasedEvent(event);
+  const draftTable = tables.find((table) => table.id === draft.tableId);
+  const occupiedDraftSeats = new Set(
+    seatingGuests
+      .filter((guest) => guest.id !== selectedGuestId && guest.tableId === draft.tableId && guest.seatNumber)
+      .map((guest) => guest.seatNumber),
+  );
 
   return (
     <section className="guest-manager">
@@ -3043,7 +3064,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
           <Upload aria-hidden="true" />
           Import
         </button>
-        <button className="secondary-button compact-button" type="button" onClick={() => setShowBulkAssignDialog(true)} disabled={saving || selectedGuestIds.length === 0}><Users aria-hidden="true" />Assign selected</button>
+        {!seatBasedEvent ? <button className="secondary-button compact-button" type="button" onClick={() => setShowBulkAssignDialog(true)} disabled={saving || selectedGuestIds.length === 0}><Users aria-hidden="true" />Assign selected</button> : null}
         <button className="primary-button create-object-button" type="button" onClick={startCreateGuest}><Plus aria-hidden="true" />Create new guest</button>
       </div>
 
@@ -3128,7 +3149,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
               </label>
               <label>
                 Status
-                <select value={draft.status} onChange={(formEvent) => setDraft((current) => ({ ...current, status: formEvent.target.value as AdminGuest["status"], tableId: formEvent.target.value === "Archived" ? "" : current.tableId }))}>
+                <select value={draft.status} onChange={(formEvent) => setDraft((current) => ({ ...current, status: formEvent.target.value as AdminGuest["status"], tableId: formEvent.target.value === "Archived" ? "" : current.tableId, seatNumber: formEvent.target.value === "Archived" ? "" : current.seatNumber }))}>
                   <option>Active</option>
                   <option>Cancelled</option>
                   <option>CheckedIn</option>
@@ -3137,11 +3158,24 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
               </label>
               <label>
                 Assigned Table
-                <select value={draft.tableId} onChange={(formEvent) => setDraft((current) => ({ ...current, tableId: formEvent.target.value }))} disabled={draft.status === "Archived"}>
+                <select value={draft.tableId} onChange={(formEvent) => setDraft((current) => ({ ...current, tableId: formEvent.target.value, seatNumber: "" }))} disabled={draft.status === "Archived"}>
                   <option value="">System: unassigned</option>
                   {tables.map((table) => <option key={table.id} value={table.id}>Table {table.number} - {table.name}</option>)}
                 </select>
               </label>
+              {seatBasedEvent && draftTable ? (
+                <label>
+                  Seat Number
+                  <select value={draft.seatNumber} onChange={(formEvent) => setDraft((current) => ({ ...current, seatNumber: formEvent.target.value }))} disabled={draft.status === "Archived"}>
+                    <option value="">Choose seat</option>
+                    {seatNumbersForTable(draftTable).map((seatNumber) => (
+                      <option key={seatNumber} value={seatNumber} disabled={occupiedDraftSeats.has(seatNumber)}>
+                        Seat {seatNumber}{occupiedDraftSeats.has(seatNumber) ? " - assigned" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <label className="span-3">
                 Notes
                 <textarea value={draft.notes} onChange={(formEvent) => setDraft((current) => ({ ...current, notes: formEvent.target.value }))} rows={4} placeholder="Dietary notes, family group, special handling..." />
@@ -3166,8 +3200,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
             <span>{assignedGuests} assigned</span>
             <span>{unassignedGuests} unassigned</span>
             <span>{activePeople} active people</span>
-            <span>{assignedPeople} seated people</span>
-            <span>{unassignedPeople} unseated people</span>
+            <span>{seatBasedEvent ? assignedGuests : assignedPeople} {seatBasedEvent ? "assigned seats" : "seated people"}</span>
+            <span>{seatBasedEvent ? unassignedGuests : unassignedPeople} {seatBasedEvent ? "without seats" : "unseated people"}</span>
             {duplicateGuests ? <span>{duplicateGuests} duplicate flags</span> : null}
           </div>
         </div>
@@ -3238,6 +3272,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                 <th>People</th>
                 <th>Status</th>
                 <th>Assigned Table</th>
+                {seatBasedEvent ? <th>Seat</th> : null}
                 <th>Notes</th>
                 <th>Flags</th>
                 <th>Actions</th>
@@ -3267,6 +3302,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                     <td data-label="People">{normalizePersonCount(guest.personCount)}</td>
                     <td data-label="Status"><span className={`event-status ${guest.status === "Active" ? "published" : ""}`}>{guest.status}</span></td>
                     <td data-label="Assigned Table">{guest.tableCode ? `Table ${guest.tableCode}` : "System: unassigned"}<span>{guest.tableName || (table ? table.name : "")}</span></td>
+                    {seatBasedEvent ? <td data-label="Seat">{guest.seatNumber ? `Seat ${guest.seatNumber}` : "-"}</td> : null}
                     <td data-label="Notes">{guest.notes || "-"}</td>
                     <td data-label="Flags">{guest.isDuplicate ? <span className="guest-flag warning"><FileWarning aria-hidden="true" />Duplicate</span> : <span className="guest-flag ok"><Check aria-hidden="true" />Clear</span>}</td>
                     <td className="actions-cell" data-label="Actions">
@@ -3317,6 +3353,7 @@ function emptyGuestDraft(): AdminGuestDraft {
     notes: "",
     personCount: 1,
     tableId: "",
+    seatNumber: "",
     status: "Active",
   };
 }
@@ -3329,6 +3366,7 @@ function guestToDraft(guest: AdminGuest): AdminGuestDraft {
     notes: guest.notes ?? "",
     personCount: normalizePersonCount(guest.personCount),
     tableId: guest.tableId ?? "",
+    seatNumber: guest.seatNumber ?? "",
     status: guest.status ?? "Active",
   };
 }
@@ -3339,6 +3377,14 @@ function normalizePersonCount(value: number | null | undefined) {
 
 function sumGuestPeople(guests: AdminGuest[]) {
   return guests.reduce((total, guest) => total + normalizePersonCount(guest.personCount), 0);
+}
+
+function isSeatBasedEvent(event: Pick<AdminEvent, "seatingAssignmentMode">) {
+  return normalizeSeatingAssignmentMode(event.seatingAssignmentMode) === "seat";
+}
+
+function seatNumbersForTable(table: AdminTable) {
+  return Array.from({ length: Math.max(1, table.maximumCapacity) }, (_, index) => String(index + 1));
 }
 
 function parseGuestCsv(text: string) {
@@ -3503,6 +3549,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   const [showTableForm, setShowTableForm] = useState(false);
   const [editingTableId, setEditingTableId] = useState("");
   const [selectedObjectId, setSelectedObjectId] = useState("");
+  const [selectedSeatNumber, setSelectedSeatNumber] = useState("");
   const [assignmentQuery, setAssignmentQuery] = useState("");
   const [designExportOrder, setDesignExportOrder] = useState<"lastName" | "firstName" | "tableNumber">("lastName");
   const [error, setError] = useState("");
@@ -3752,13 +3799,25 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
     }));
   }
 
+  const seatBasedEvent = isSeatBasedEvent(event);
   const selectedObject = floorObjects.find((object) => object.id === selectedObjectId);
+  const selectedTable = selectedObject?.type === "table" && selectedObject.linkedTableId
+    ? tables.find((table) => table.id === selectedObject.linkedTableId)
+    : undefined;
+  const selectedTableGuests = selectedTable
+    ? guests.filter((guest) => guest.tableId === selectedTable.id && (guest.status === "Active" || guest.status === "CheckedIn"))
+    : [];
+  const occupiedSelectedTableSeats = new globalThis.Map(
+    selectedTableGuests
+      .filter((guest) => guest.seatNumber)
+      .map((guest) => [guest.seatNumber, guest]),
+  );
   const filteredAssignmentGuests = guests.filter((guest) => {
     const normalized = normalizeSearch(`${guest.displayName} ${guest.tableCode} ${guest.tableName}`);
     return !normalizeSearch(assignmentQuery) || normalized.includes(normalizeSearch(assignmentQuery));
   });
 
-  async function assignGuestToTable(guestId: string, tableId: string | null | undefined) {
+  async function assignGuestToTable(guestId: string, tableId: string | null | undefined, seatNumber?: string | null) {
     if (!token || !tableId) {
       setWarning("This table needs to be saved before guests can be assigned to it.");
       return;
@@ -3766,8 +3825,16 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
 
     const guest = guests.find((item) => item.id === guestId);
     const table = tables.find((item) => item.id === tableId);
+    if (seatBasedEvent && !seatNumber) {
+      setWarning("Choose a seat before assigning a guest.");
+      return;
+    }
+    if (seatBasedEvent && seatNumber && guests.some((item) => item.id !== guestId && item.tableId === tableId && item.seatNumber === seatNumber && (item.status === "Active" || item.status === "CheckedIn"))) {
+      setWarning(`Seat ${seatNumber} is already assigned.`);
+      return;
+    }
     const guestPeople = guest?.status === "Active" || guest?.status === "CheckedIn" ? normalizePersonCount(guest.personCount) : 0;
-    if (guest?.tableId !== tableId && table && table.assignedGuestCount + guestPeople > table.maximumCapacity) {
+    if (!seatBasedEvent && guest?.tableId !== tableId && table && table.assignedGuestCount + guestPeople > table.maximumCapacity) {
       setWarning(`${table.name || `Table ${table.number}`} is full.`);
       return;
     }
@@ -3783,11 +3850,12 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ tableId }),
+        body: JSON.stringify({ tableId, seatNumber: seatBasedEvent ? seatNumber : null }),
       });
 
       if (!response.ok) throw new Error(await readError(response));
       clearEventAdminCaches(event.id);
+      setSelectedSeatNumber("");
       await loadFloorPlan({ force: true });
     } catch (assignError) {
       setWarning(assignError instanceof Error ? assignError.message : "Could not assign guest.");
@@ -3844,7 +3912,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       return left.lastName.localeCompare(right.lastName) || left.firstName.localeCompare(right.firstName) || left.displayName.localeCompare(right.displayName);
     });
 
-    const lines = ["First Name,Last Name,Display Name,Person Count,Table Number,Table Name,Status"];
+    const lines = ["First Name,Last Name,Display Name,Person Count,Table Number,Table Name,Seat Number,Status"];
     sortedGuests.forEach((guest) => {
       lines.push([
         guest.firstName,
@@ -3853,6 +3921,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
         String(normalizePersonCount(guest.personCount)),
         guest.tableCode || "Unassigned",
         guest.tableName,
+        guest.seatNumber ?? "",
         guest.status,
       ].map(csvCell).join(","));
     });
@@ -3950,7 +4019,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                 <input value={tableDraft.number} onChange={(formEvent) => setTableDraft((current) => ({ ...current, number: formEvent.target.value }))} placeholder="12" />
               </label>
               <label>
-                Maximum Capacity
+                {seatBasedEvent ? "Seats per table" : "Maximum Capacity"}
                 <input type="number" min="1" value={tableDraft.maximumCapacity} onChange={(formEvent) => setTableDraft((current) => ({ ...current, maximumCapacity: Number(formEvent.target.value) }))} />
               </label>
               <label>
@@ -3961,7 +4030,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
               </label>
               {editingTableId ? (
                 <label>
-                  Assigned Person Count
+                  {seatBasedEvent ? "Assigned Seats" : "Assigned Person Count"}
                   <input value={tables.find((table) => table.id === editingTableId)?.assignedGuestCount ?? 0} readOnly />
                 </label>
               ) : null}
@@ -3988,8 +4057,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                 <th>Name</th>
                 <th>Number</th>
                 <th>Shape</th>
-                <th>Maximum Capacity</th>
-                <th>Assigned Persons</th>
+                <th>{seatBasedEvent ? "Seats" : "Maximum Capacity"}</th>
+                <th>{seatBasedEvent ? "Assigned Seats" : "Assigned Persons"}</th>
                 <th>Notes</th>
                 <th>Actions</th>
               </tr>
@@ -4000,8 +4069,8 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                   <td data-label="Name"><strong>{table.name}</strong></td>
                   <td data-label="Number">{table.number}</td>
                   <td data-label="Shape">{tableShapeOptions.find((shape) => shape.value === table.shape)?.label ?? table.shape}</td>
-                  <td data-label="Maximum Capacity">{table.maximumCapacity}</td>
-                  <td data-label="Assigned Persons">{table.assignedGuestCount}</td>
+                  <td data-label={seatBasedEvent ? "Seats" : "Maximum Capacity"}>{table.maximumCapacity}</td>
+                  <td data-label={seatBasedEvent ? "Assigned Seats" : "Assigned Persons"}>{table.assignedGuestCount}</td>
                   <td data-label="Notes">{table.notes || "-"}</td>
                   <td className="actions-cell" data-label="Actions">
                     <div className="event-actions">
@@ -4074,7 +4143,10 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                   className={`floor-designer-object ${object.type} ${object.shape}`}
                   draggable
                   key={object.id}
-                  onClick={() => setSelectedObjectId(object.id)}
+                  onClick={() => {
+                    setSelectedObjectId(object.id);
+                    setSelectedSeatNumber("");
+                  }}
                   onDragStart={(dragEvent) => dragEvent.dataTransfer.setData("floor-object-id", object.id)}
                   onDragOver={object.type === "table" ? (dragEvent) => dragEvent.preventDefault() : undefined}
                   onDrop={object.type === "table" ? (dropEvent) => {
@@ -4082,7 +4154,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                     if (!guestId) return;
                     dropEvent.preventDefault();
                     dropEvent.stopPropagation();
-                    void assignGuestToTable(guestId, object.linkedTableId);
+                    void assignGuestToTable(guestId, object.linkedTableId, object.linkedTableId === selectedTable?.id ? selectedSeatNumber : null);
                   } : undefined}
                   style={{
                     left: `${object.x * 100}%`,
@@ -4101,8 +4173,39 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
           <aside className="guest-assignment-panel" aria-label="Guests to assign">
             <div>
               <p className="eyebrow">Guests</p>
-              <h3>Drag to a table</h3>
+              <h3>{seatBasedEvent ? "Pick a seat" : "Drag to a table"}</h3>
             </div>
+            {seatBasedEvent ? (
+              <div className="seat-assignment-card" aria-label="Table seat assignment">
+                {selectedTable ? (
+                  <>
+                    <div>
+                      <strong>Table {selectedTable.number}</strong>
+                      <span>{selectedTable.assignedGuestCount}/{selectedTable.maximumCapacity} seats assigned</span>
+                    </div>
+                    <div className="seat-grid">
+                      {seatNumbersForTable(selectedTable).map((seatNumber) => {
+                        const occupant = occupiedSelectedTableSeats.get(seatNumber);
+                        return (
+                          <button
+                            className={`seat-chip ${selectedSeatNumber === seatNumber ? "active" : ""} ${occupant ? "occupied" : ""}`}
+                            key={seatNumber}
+                            type="button"
+                            onClick={() => setSelectedSeatNumber(seatNumber)}
+                            title={occupant ? `${occupant.displayName} is assigned to this seat` : `Assign seat ${seatNumber}`}
+                          >
+                            <strong>{seatNumber}</strong>
+                            <span>{occupant ? initials(occupant.displayName) : "Open"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <span>Select a table on the floor plan.</span>
+                )}
+              </div>
+            ) : null}
             <label className="admin-search assignment-search">
               <Search aria-hidden="true" />
               <input value={assignmentQuery} onChange={(formEvent) => setAssignmentQuery(formEvent.target.value)} placeholder="Search guests" aria-label="Search guests to assign" />
@@ -4114,10 +4217,14 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                   draggable
                   key={guest.id}
                   type="button"
+                  onClick={() => {
+                    if (!seatBasedEvent || !selectedTable) return;
+                    void assignGuestToTable(guest.id, selectedTable.id, selectedSeatNumber);
+                  }}
                   onDragStart={(dragEvent) => dragEvent.dataTransfer.setData("guest-id", guest.id)}
                 >
                   <strong>{guest.displayName}</strong>
-                  <span>{normalizePersonCount(guest.personCount)} {normalizePersonCount(guest.personCount) === 1 ? "person" : "people"} - {guest.tableCode ? `Table ${guest.tableCode}` : "Unassigned"}</span>
+                  <span>{normalizePersonCount(guest.personCount)} {normalizePersonCount(guest.personCount) === 1 ? "person" : "people"} - {guest.tableCode ? `Table ${guest.tableCode}${guest.seatNumber ? `, seat ${guest.seatNumber}` : ""}` : "Unassigned"}</span>
                 </button>
               ))}
             </div>
@@ -4659,7 +4766,7 @@ function EventEditorForm({ draft, editorEvent, token, onDraftChange, onSubmit, o
                     <label key={id} htmlFor={id}>
                       {field.label}
                       <select id={id} value={value} onChange={(event) => field.draftField ? update(field.draftField, event.target.value) : undefined}>
-                        {(field.options ?? ["Draft", "Published", "Archived"]).map((option) => <option key={option} value={option}>{option}</option>)}
+                        {(field.options ?? ["Draft", "Published", "Archived"]).map((option) => <option key={option} value={option}>{eventSelectOptionLabel(field.draftField, option)}</option>)}
                       </select>
                     </label>
                   );
@@ -4737,6 +4844,7 @@ function emptyEventDraft(): AdminEventDraft {
     name: "",
     slug: "",
     eventType: "Wedding",
+    seatingAssignmentMode: "table",
     subtitle: "",
     dateLabel: "",
     venueName: "",
@@ -4752,6 +4860,18 @@ function emptyEventDraft(): AdminEventDraft {
     searchPlaceholder: "Search by name",
     heroImageUrl: "/guest-wedding-banner.png",
   };
+}
+
+function normalizeSeatingAssignmentMode(value: string | null | undefined): "table" | "seat" {
+  return value === "seat" ? "seat" : "table";
+}
+
+function eventSelectOptionLabel(field: keyof AdminEventDraft | undefined, value: string) {
+  if (field === "seatingAssignmentMode") {
+    return seatingAssignmentModeOptions.find((option) => option.value === value)?.label ?? value;
+  }
+
+  return value;
 }
 
 function slugify(value: string) {

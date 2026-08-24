@@ -440,7 +440,7 @@ app.MapPost("/api/admin/events/{eventId:guid}/guests/{guestId:guid}/assign-table
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
 
-    var result = store.AssignGuestToTable(eventId, guestId, assignment.TableId);
+    var result = store.AssignGuestToTable(eventId, guestId, assignment.TableId, assignment.SeatNumber);
     return result.Error switch
     {
         "not-found" => Results.NotFound(),
@@ -739,6 +739,7 @@ namespace Sassoir.Api.Data
                   date_label text not null default '',
                   venue_name text not null default '',
                   venue_address text not null default '',
+                  seating_assignment_mode text not null default 'table',
                   status text not null default 'Draft',
                   is_public boolean not null default false,
                   published_at timestamptz,
@@ -907,6 +908,8 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_search_metrics_event_created on search_metrics(event_id, created_at);
                 create index if not exists ix_contact_submissions_submitted_at_utc on contact_submissions(submitted_at_utc desc);
                 create index if not exists ix_app_users_email on app_users(email);
+
+                alter table events add column if not exists seating_assignment_mode text not null default 'table';
             """);
         }
     }
@@ -1367,6 +1370,7 @@ namespace Sassoir.Api.Data
                     item.Name,
                     item.Slug,
                     item.EventType,
+                    item.SeatingAssignmentMode,
                     item.Subtitle,
                     item.DateLabel,
                     item.VenueName,
@@ -1382,7 +1386,9 @@ namespace Sassoir.Api.Data
                     item.Theme == null || item.Theme.SearchPlaceholder == string.Empty ? "Search by name" : item.Theme.SearchPlaceholder,
                     item.Theme == null ? null : item.Theme.HeroImageUrl,
                     item.Guests.Count(guest => guest.Status != GuestStatus.Archived),
-                    item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)))
+                    item.SeatingAssignmentMode == "seat"
+                        ? item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null && guest.SeatNumber != null && guest.SeatNumber != string.Empty)
+                        : item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)))
                 .ToArray();
         }
 
@@ -1415,6 +1421,7 @@ namespace Sassoir.Api.Data
                     item.Name,
                     item.Slug,
                     item.EventType,
+                    item.SeatingAssignmentMode,
                     item.Subtitle,
                     item.DateLabel,
                     item.VenueName,
@@ -1430,7 +1437,9 @@ namespace Sassoir.Api.Data
                     item.Theme == null || item.Theme.SearchPlaceholder == string.Empty ? "Search by name" : item.Theme.SearchPlaceholder,
                     item.Theme == null ? null : item.Theme.HeroImageUrl,
                     item.Guests.Count(guest => guest.Status != GuestStatus.Archived),
-                    item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)))
+                    item.SeatingAssignmentMode == "seat"
+                        ? item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null && guest.SeatNumber != null && guest.SeatNumber != string.Empty)
+                        : item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)))
                 .ToArrayAsync(cancellationToken);
 
             return new PaginatedResponse<AdminEventDto>(items, paging.Page, paging.PageSize, totalCount);
@@ -1458,6 +1467,7 @@ namespace Sassoir.Api.Data
                 DateLabel = request.DateLabel?.Trim() ?? string.Empty,
                 VenueName = request.VenueName?.Trim() ?? string.Empty,
                 VenueAddress = request.VenueAddress?.Trim() ?? string.Empty,
+                SeatingAssignmentMode = NormalizeSeatingAssignmentMode(request.SeatingAssignmentMode),
                 Status = request.Status,
                 IsPublic = request.Status == EventStatus.Published,
                 PublishedAt = request.Status == EventStatus.Published ? now : null,
@@ -1519,6 +1529,7 @@ namespace Sassoir.Api.Data
             eventEntity.DateLabel = request.DateLabel?.Trim() ?? string.Empty;
             eventEntity.VenueName = request.VenueName?.Trim() ?? string.Empty;
             eventEntity.VenueAddress = request.VenueAddress?.Trim() ?? string.Empty;
+            eventEntity.SeatingAssignmentMode = NormalizeSeatingAssignmentMode(request.SeatingAssignmentMode);
             eventEntity.Status = request.Status;
             eventEntity.IsPublic = request.Status == EventStatus.Published;
             eventEntity.PublishedAt = request.Status == EventStatus.Published ? eventEntity.PublishedAt ?? DateTimeOffset.UtcNow : null;
@@ -1644,6 +1655,7 @@ namespace Sassoir.Api.Data
                     item.TableId,
                     item.Table == null ? string.Empty : item.Table.Code,
                     item.Table == null ? string.Empty : item.Table.Name,
+                    item.SeatNumber,
                     item.Status,
                     false))
                 .ToArrayAsync(cancellationToken);
@@ -1657,9 +1669,16 @@ namespace Sassoir.Api.Data
 
             var guest = BuildGuest(eventId, request.FirstName, request.LastName, request.DisplayName, request.Notes, request.PersonCount);
             if (string.IsNullOrWhiteSpace(guest.DisplayName)) return (null, "Display name is required.");
+            guest.Status = request.Status ?? GuestStatus.Active;
+
+            var assignment = ValidateGuestAssignment(eventId, null, guest.Status == GuestStatus.Archived ? null : request.TableId, request.SeatNumber, guest.Status, guest.PersonCount);
+            if (assignment.Error is not null) return (null, assignment.Error);
+            guest.TableId = guest.Status == GuestStatus.Archived ? null : request.TableId;
+            guest.SeatNumber = guest.TableId is null ? null : assignment.SeatNumber;
 
             _db.Guests.Add(guest);
             _db.SaveChanges();
+            guest.Table = assignment.Table;
             return (ToAdminGuestDto(guest), null);
         }
 
@@ -1673,32 +1692,24 @@ namespace Sassoir.Api.Data
             var displayName = BuildDisplayName(firstName, lastName, request.DisplayName);
             if (string.IsNullOrWhiteSpace(displayName)) return (null, "Display name is required.");
 
-            EventTableEntity? table = null;
-            if (request.TableId is not null)
-            {
-                table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == request.TableId && item.EventId == eventId);
-                if (table is null) return (null, "not-found");
-
-                var assignedCount = CountSeatedPeople(table.Guests.Where(item => item.Id != guestId));
-                var requestedPeople = CountsTowardSeating(request.Status) ? NormalizePersonCount(request.PersonCount) : 0;
-                if (assignedCount + requestedPeople > table.Capacity)
-                {
-                    return (null, $"Table {table.Code} is full.");
-                }
-            }
+            var normalizedPersonCount = NormalizePersonCount(request.PersonCount);
+            var finalTableId = request.Status == GuestStatus.Archived ? null : request.TableId;
+            var assignment = ValidateGuestAssignment(eventId, guestId, finalTableId, request.SeatNumber, request.Status, normalizedPersonCount);
+            if (assignment.Error is not null) return (null, assignment.Error);
 
             guest.FirstName = firstName;
             guest.LastName = lastName;
             guest.DisplayName = displayName;
             guest.NormalizedSearchName = SearchNormalizer.Normalize(displayName);
             guest.Notes = request.Notes?.Trim();
-            guest.PersonCount = NormalizePersonCount(request.PersonCount);
-            guest.TableId = request.Status == GuestStatus.Archived ? null : request.TableId;
+            guest.PersonCount = normalizedPersonCount;
+            guest.TableId = finalTableId;
+            guest.SeatNumber = finalTableId is null ? null : assignment.SeatNumber;
             guest.Status = request.Status;
             guest.UpdatedAt = DateTimeOffset.UtcNow;
             _db.SaveChanges();
 
-            guest.Table = guest.TableId is null ? null : table;
+            guest.Table = guest.TableId is null ? null : assignment.Table;
             return (ToAdminGuestDto(guest), null);
         }
 
@@ -1709,6 +1720,7 @@ namespace Sassoir.Api.Data
 
             guest.Status = GuestStatus.Archived;
             guest.TableId = null;
+            guest.SeatNumber = null;
             guest.UpdatedAt = DateTimeOffset.UtcNow;
             _db.SaveChanges();
             guest.Table = null;
@@ -1725,31 +1737,21 @@ namespace Sassoir.Api.Data
             return true;
         }
 
-        public (AdminGuestDto? Guest, string? Error) AssignGuestToTable(Guid eventId, Guid guestId, Guid? tableId)
+        public (AdminGuestDto? Guest, string? Error) AssignGuestToTable(Guid eventId, Guid guestId, Guid? tableId, string? seatNumber)
         {
             var guest = _db.Guests.Include(item => item.Table).SingleOrDefault(item => item.Id == guestId && item.EventId == eventId);
             if (guest is null) return (null, "not-found");
             if (guest.Status == GuestStatus.Archived) return (null, "Archived guests cannot be assigned to tables.");
 
-            EventTableEntity? table = null;
-            if (tableId is not null)
-            {
-                table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
-                if (table is null) return (null, "not-found");
-
-                var assignedCount = CountSeatedPeople(table.Guests.Where(item => item.Id != guestId));
-                var guestPeople = CountsTowardSeating(guest.Status) ? Math.Max(1, guest.PersonCount) : 0;
-                if (assignedCount + guestPeople > table.Capacity)
-                {
-                    return (null, $"Table {table.Code} is full.");
-                }
-            }
+            var assignmentResult = ValidateGuestAssignment(eventId, guestId, tableId, seatNumber, guest.Status, guest.PersonCount);
+            if (assignmentResult.Error is not null) return (null, assignmentResult.Error);
 
             guest.TableId = tableId;
+            guest.SeatNumber = tableId is null ? null : assignmentResult.SeatNumber;
             guest.UpdatedAt = DateTimeOffset.UtcNow;
             _db.SaveChanges();
 
-            guest.Table = table;
+            guest.Table = assignmentResult.Table;
             return (ToAdminGuestDto(guest), null);
         }
 
@@ -1766,6 +1768,7 @@ namespace Sassoir.Api.Data
                 .ToArray();
             if (guests.Length != uniqueGuestIds.Length) return (null, "not-found");
             if (guests.Any(item => item.Status == GuestStatus.Archived)) return (null, "Archived guests cannot be assigned to tables.");
+            if (tableId is not null && GetEventSeatingAssignmentMode(eventId) == "seat") return (null, "Seat-based events assign seats one guest at a time.");
 
             EventTableEntity? table = null;
             if (tableId is not null)
@@ -1784,6 +1787,7 @@ namespace Sassoir.Api.Data
             foreach (var guest in guests)
             {
                 guest.TableId = tableId;
+                guest.SeatNumber = null;
                 guest.UpdatedAt = DateTimeOffset.UtcNow;
                 guest.Table = table;
             }
@@ -1838,7 +1842,7 @@ namespace Sassoir.Api.Data
 
             var guests = GetAdminGuests(eventId);
             var builder = new StringBuilder();
-            builder.AppendLine("First Name,Last Name,Display Name,Person Count,Notes,Status,Table Number,Table Name");
+            builder.AppendLine("First Name,Last Name,Display Name,Person Count,Notes,Status,Table Number,Table Name,Seat Number");
             foreach (var guest in guests)
             {
                 builder.AppendLine(string.Join(',', [
@@ -1849,7 +1853,8 @@ namespace Sassoir.Api.Data
                     Csv(guest.Notes),
                     Csv(guest.Status.ToString()),
                     Csv(guest.TableCode),
-                    Csv(guest.TableName)
+                    Csv(guest.TableName),
+                    Csv(guest.SeatNumber ?? string.Empty)
                 ]));
             }
 
@@ -1867,9 +1872,11 @@ namespace Sassoir.Api.Data
                     item.Name,
                     item.Code,
                     item.Capacity,
-                    item.Guests
-                        .Where(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
-                        .Sum(guest => guest.PersonCount < 1 ? 1 : guest.PersonCount),
+                    item.Event != null && item.Event.SeatingAssignmentMode == "seat"
+                        ? item.Guests.Count(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
+                        : item.Guests
+                            .Where(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
+                            .Sum(guest => guest.PersonCount < 1 ? 1 : guest.PersonCount),
                     item.Shape.ToLower() == "square" ? "square" :
                         item.Shape.ToLower() == "rectangle" ? "rectangle" :
                         item.Shape.ToLower() == "tear" ? "tear" : "round",
@@ -1904,9 +1911,11 @@ namespace Sassoir.Api.Data
                     item.Name,
                     item.Code,
                     item.Capacity,
-                    item.Guests
-                        .Where(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
-                        .Sum(guest => guest.PersonCount < 1 ? 1 : guest.PersonCount),
+                    item.Event != null && item.Event.SeatingAssignmentMode == "seat"
+                        ? item.Guests.Count(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
+                        : item.Guests
+                            .Where(guest => guest.Status == GuestStatus.Active || guest.Status == GuestStatus.CheckedIn)
+                            .Sum(guest => guest.PersonCount < 1 ? 1 : guest.PersonCount),
                     item.Shape.ToLower() == "square" ? "square" :
                         item.Shape.ToLower() == "rectangle" ? "rectangle" :
                         item.Shape.ToLower() == "tear" ? "tear" : "round",
@@ -1960,7 +1969,7 @@ namespace Sassoir.Api.Data
 
             _db.SaveChanges();
             InvalidatePublicCache(eventId);
-            return (ToAdminTableDto(table), null);
+            return (ToAdminTableDto(table, GetEventSeatingAssignmentMode(eventId)), null);
         }
 
         public (AdminTableDto? Table, string? Error) UpdateTable(Guid eventId, Guid tableId, AdminTableUpsertRequest request)
@@ -1977,10 +1986,11 @@ namespace Sassoir.Api.Data
             }
 
             var capacity = Math.Max(1, request.MaximumCapacity);
-            var assignedCount = CountSeatedPeople(table.Guests);
+            var seatingMode = GetEventSeatingAssignmentMode(eventId);
+            var assignedCount = CountAssignedSeatsOrPeople(table.Guests, seatingMode);
             if (capacity < assignedCount)
             {
-                return (null, $"Capacity cannot be below the assigned person count ({assignedCount}).");
+                return (null, $"Capacity cannot be below the assigned {(seatingMode == "seat" ? "seat" : "person")} count ({assignedCount}).");
             }
 
             var nextShape = NormalizeTableShape(request.Shape);
@@ -2003,7 +2013,7 @@ namespace Sassoir.Api.Data
 
             _db.SaveChanges();
             InvalidatePublicCache(eventId);
-            return (ToAdminTableDto(table), null);
+            return (ToAdminTableDto(table, seatingMode), null);
         }
 
         public bool DeleteTable(Guid eventId, Guid tableId)
@@ -2015,6 +2025,7 @@ namespace Sassoir.Api.Data
             foreach (var guest in guests)
             {
                 guest.TableId = null;
+                guest.SeatNumber = null;
                 guest.UpdatedAt = DateTimeOffset.UtcNow;
             }
 
@@ -2360,6 +2371,7 @@ namespace Sassoir.Api.Data
                 eventEntity.Name,
                 eventEntity.Slug,
                 eventEntity.EventType,
+                NormalizeSeatingAssignmentMode(eventEntity.SeatingAssignmentMode),
                 eventEntity.Subtitle,
                 eventEntity.DateLabel,
                 eventEntity.VenueName,
@@ -2504,20 +2516,101 @@ namespace Sassoir.Api.Data
                 guest.TableId,
                 guest.Table?.Code ?? string.Empty,
                 guest.Table?.Name ?? string.Empty,
+                guest.SeatNumber,
                 guest.Status,
                 isDuplicate);
         }
 
-        private static AdminTableDto ToAdminTableDto(EventTableEntity table)
+        private static AdminTableDto ToAdminTableDto(EventTableEntity table, string seatingAssignmentMode = "table")
         {
             return new AdminTableDto(
                 table.Id,
                 table.Name,
                 table.Code,
                 table.Capacity,
-                CountSeatedPeople(table.Guests),
+                CountAssignedSeatsOrPeople(table.Guests, seatingAssignmentMode),
                 NormalizeTableShape(table.Shape),
                 table.Notes ?? string.Empty);
+        }
+
+        private (EventTableEntity? Table, string? SeatNumber, string? Error) ValidateGuestAssignment(Guid eventId, Guid? guestId, Guid? tableId, string? seatNumber, GuestStatus status, int personCount)
+        {
+            if (tableId is null) return (null, null, null);
+
+            var table = _db.EventTables.Include(item => item.Guests).SingleOrDefault(item => item.Id == tableId && item.EventId == eventId);
+            if (table is null) return (null, null, "not-found");
+
+            var seatingMode = GetEventSeatingAssignmentMode(eventId);
+            if (seatingMode == "seat")
+            {
+                var normalizedSeat = NormalizeSeatNumber(seatNumber, table.Capacity);
+                if (normalizedSeat.Error is not null) return (null, null, normalizedSeat.Error);
+
+                if (CountsTowardSeating(status))
+                {
+                    var assignedCount = CountSeatedGuests(table.Guests.Where(item => item.Id != guestId));
+                    if (assignedCount + 1 > table.Capacity)
+                    {
+                        return (null, null, $"Table {table.Code} is full.");
+                    }
+
+                    var seatTaken = table.Guests.Any(item =>
+                        item.Id != guestId &&
+                        CountsTowardSeating(item.Status) &&
+                        string.Equals(item.SeatNumber, normalizedSeat.SeatNumber, StringComparison.OrdinalIgnoreCase));
+                    if (seatTaken)
+                    {
+                        return (null, null, $"Seat {normalizedSeat.SeatNumber} at table {table.Code} is already assigned.");
+                    }
+                }
+
+                return (table, normalizedSeat.SeatNumber, null);
+            }
+
+            var assignedPeople = CountSeatedPeople(table.Guests.Where(item => item.Id != guestId));
+            var requestedPeople = CountsTowardSeating(status) ? Math.Max(1, personCount) : 0;
+            if (assignedPeople + requestedPeople > table.Capacity)
+            {
+                return (null, null, $"Table {table.Code} is full.");
+            }
+
+            return (table, null, null);
+        }
+
+        private string GetEventSeatingAssignmentMode(Guid eventId)
+        {
+            var mode = _db.Events
+                .AsNoTracking()
+                .Where(item => item.Id == eventId)
+                .Select(item => item.SeatingAssignmentMode)
+                .SingleOrDefault();
+
+            return NormalizeSeatingAssignmentMode(mode);
+        }
+
+        private static (string? SeatNumber, string? Error) NormalizeSeatNumber(string? seatNumber, int tableCapacity)
+        {
+            if (string.IsNullOrWhiteSpace(seatNumber))
+            {
+                return (null, "Choose a seat number for this table.");
+            }
+
+            if (!int.TryParse(seatNumber.Trim(), out var parsedSeat) || parsedSeat < 1 || parsedSeat > tableCapacity)
+            {
+                return (null, $"Seat number must be between 1 and {tableCapacity}.");
+            }
+
+            return (parsedSeat.ToString(CultureInfo.InvariantCulture), null);
+        }
+
+        private static int CountAssignedSeatsOrPeople(IEnumerable<GuestEntity> guests, string seatingAssignmentMode)
+        {
+            return seatingAssignmentMode == "seat" ? CountSeatedGuests(guests) : CountSeatedPeople(guests);
+        }
+
+        private static int CountSeatedGuests(IEnumerable<GuestEntity> guests)
+        {
+            return guests.Count(guest => CountsTowardSeating(guest.Status));
         }
 
         private static int CountSeatedPeople(IEnumerable<GuestEntity> guests)
@@ -2535,6 +2628,11 @@ namespace Sassoir.Api.Data
         private static bool CountsTowardSeating(GuestStatus status)
         {
             return status is GuestStatus.Active or GuestStatus.CheckedIn;
+        }
+
+        private static string NormalizeSeatingAssignmentMode(string? mode)
+        {
+            return string.Equals(mode?.Trim(), "seat", StringComparison.OrdinalIgnoreCase) ? "seat" : "table";
         }
 
         private static string NormalizeTableShape(string? shape)
@@ -3033,6 +3131,7 @@ namespace Sassoir.Api.Models
         string Name,
         string Slug,
         string EventType,
+        string SeatingAssignmentMode,
         string Subtitle,
         string DateLabel,
         string VenueName,
@@ -3109,12 +3208,13 @@ namespace Sassoir.Api.Models
         Guid? TableId,
         string TableCode,
         string TableName,
+        string? SeatNumber,
         GuestStatus Status,
         bool IsDuplicate);
 
-    public sealed record AdminGuestCreateRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount);
+    public sealed record AdminGuestCreateRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount, Guid? TableId, string? SeatNumber, GuestStatus? Status);
 
-    public sealed record AdminGuestUpsertRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount, Guid? TableId, GuestStatus Status);
+    public sealed record AdminGuestUpsertRequest(string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount, Guid? TableId, string? SeatNumber, GuestStatus Status);
 
     public sealed record AdminGuestImportRequest(IReadOnlyList<AdminGuestImportRow> Guests);
 
@@ -3124,7 +3224,7 @@ namespace Sassoir.Api.Models
 
     public sealed record AdminGuestImportRowDto(int RowNumber, string FirstName, string LastName, string DisplayName, string Notes, int PersonCount, bool IsDuplicate, string[] Errors);
 
-    public sealed record AssignGuestTableRequest(Guid? TableId);
+    public sealed record AssignGuestTableRequest(Guid? TableId, string? SeatNumber);
 
     public sealed record BulkAssignGuestTableRequest(IReadOnlyList<Guid> GuestIds, Guid? TableId);
 
@@ -3162,6 +3262,7 @@ namespace Sassoir.Api.Models
         string? VenueName,
         string? VenueAddress,
         string? EventType,
+        string? SeatingAssignmentMode,
         EventStatus Status,
         string? HeroText,
         string? PrimaryColor,
@@ -3178,6 +3279,7 @@ namespace Sassoir.Api.Models
         string Name,
         string Slug,
         string EventType,
+        string SeatingAssignmentMode,
         string Subtitle,
         string DateLabel,
         string VenueName,
@@ -3266,6 +3368,7 @@ namespace Sassoir.Api.Models
                 eventDetails.Name,
                 eventDetails.Slug,
                 eventDetails.EventType,
+                eventDetails.SeatingAssignmentMode,
                 eventDetails.Subtitle,
                 eventDetails.DateLabel,
                 eventDetails.VenueName,
@@ -3281,7 +3384,9 @@ namespace Sassoir.Api.Models
                 eventDetails.Theme.SearchPlaceholder,
                 eventDetails.Theme.HeroImageUrl,
                 eventDetails.Guests.Count(guest => guest.Status != GuestStatus.Archived),
-                eventDetails.Guests.Count(guest => guest.Status != GuestStatus.Archived && !string.IsNullOrWhiteSpace(guest.TableCode)));
+                eventDetails.SeatingAssignmentMode == "seat"
+                    ? eventDetails.Guests.Count(guest => guest.Status != GuestStatus.Archived && !string.IsNullOrWhiteSpace(guest.TableCode) && !string.IsNullOrWhiteSpace(guest.SeatNumber))
+                    : eventDetails.Guests.Count(guest => guest.Status != GuestStatus.Archived && !string.IsNullOrWhiteSpace(guest.TableCode)));
         }
 
         public static GuestSearchResultDto ToSearchDto(this Guest guest)

@@ -21,6 +21,7 @@ create table events (
   date_label text not null default '',
   venue_name text not null default '',
   venue_address text not null default '',
+  seating_assignment_mode text not null default 'table',
   status text not null default 'Draft',
   is_public boolean not null default false,
   published_at timestamptz,
