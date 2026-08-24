@@ -29,6 +29,7 @@ Set these environment variables on the API service:
 
 ```text
 ASPNETCORE_ENVIRONMENT=Production
+DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 ConnectionStrings__DefaultConnection=YOUR_RENDER_POSTGRES_EXTERNAL_DATABASE_URL
 Auth__Issuer=sassoir
 Auth__Audience=sassoir.admin

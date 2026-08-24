@@ -12,6 +12,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
 
 ENV ASPNETCORE_ENVIRONMENT=Production
+ENV DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 COPY --from=build /app/publish ./
 
 ENTRYPOINT ["dotnet", "Sassoir.Api.dll"]
