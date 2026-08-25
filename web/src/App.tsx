@@ -186,6 +186,7 @@ const adminTableRequests = new globalThis.Map<string, Promise<AdminTable[]>>();
 const adminFloorPlanRequests = new globalThis.Map<string, Promise<FloorPlanCacheEntry>>();
 const publicEventCache = new globalThis.Map<string, { event: PublicEvent; floorObjects: FloorObject[] }>();
 const minimumGuestSearchCharacters = 2;
+const guestImportCommitBatchSize = 25;
 
 function clearEventAdminCaches(eventId: string) {
   adminEventCache.delete(eventId);
@@ -3011,15 +3012,21 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
     setMessage("");
 
     try {
-      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/import/commit-csv`), {
-        method: "POST",
-        headers: {
-          "Content-Type": "text/csv",
-          Authorization: `Bearer ${token}`,
-        },
-        body: rowsToGuestImportCsv(validRows),
-      });
-      if (!response.ok) throw new Error(await readError(response));
+      const batches = chunkRows(validRows, guestImportCommitBatchSize);
+      let importedCount = 0;
+      for (const batch of batches) {
+        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/import/commit-csv`), {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/csv",
+            Authorization: `Bearer ${token}`,
+          },
+          body: rowsToGuestImportCsv(batch),
+        });
+        if (!response.ok) throw new Error(await readError(response));
+        importedCount += batch.length;
+        setMessage(`${importedCount}/${validRows.length} guests imported...`);
+      }
 
       setImportPreview(null);
       setImportRows([]);
@@ -3027,7 +3034,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       clearEventAdminCaches(event.id);
       await loadGuests({ force: true });
     } catch (importError) {
-      setError(importFailureMessage(importError, "Could not import guests."));
+      setError(importFailureMessage(importError, "Could not import guests"));
     } finally {
       setSaving(false);
     }
@@ -3690,9 +3697,17 @@ function rowsToGuestImportCsv(rows: Array<Pick<ImportPreviewRow, "firstName" | "
   return `${lines.join("\n")}\n`;
 }
 
+function chunkRows<T>(rows: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < rows.length; index += size) {
+    chunks.push(rows.slice(index, index + size));
+  }
+  return chunks;
+}
+
 function importFailureMessage(error: unknown, fallback: string) {
   if (error instanceof TypeError && /fetch/i.test(error.message)) {
-    return `${fallback}. The live API could not be reached for this import batch. Please try again; if it only happens with a large list, split the CSV into smaller files.`;
+    return `${fallback}. The live API could not be reached for this import batch. Please try again; if it keeps happening, use a smaller CSV or check that the latest API deployment is live.`;
   }
 
   return error instanceof Error ? error.message : fallback;
