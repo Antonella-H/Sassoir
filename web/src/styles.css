@@ -1729,7 +1729,15 @@ p {
   font-weight: 800;
   text-align: center;
   text-transform: uppercase;
-  overflow: hidden;
+  overflow: visible;
+  transform-origin: center;
+}
+
+.guest-plan-object-label {
+  position: relative;
+  z-index: 2;
+  padding: 3px;
+  overflow-wrap: anywhere;
 }
 
 .guest-plan-object.round {
@@ -1762,6 +1770,37 @@ p {
   background: var(--guest-ink);
   color: var(--guest-paper);
   box-shadow: 0 0 0 5px rgba(17, 18, 13, 0.12);
+}
+
+.guest-table-seat-marker-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.guest-table-seat-marker {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 1.4px solid var(--guest-paper);
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(17, 18, 13, 0.22);
+}
+
+.guest-plan-object.round .guest-table-seat-marker {
+  border-radius: 50%;
+}
+
+.guest-table-seat-marker.unassigned {
+  background: var(--guest-bone);
+}
+
+.guest-table-seat-marker.assigned {
+  background: var(--guest-olive);
+  width: 11px;
+  height: 11px;
+  box-shadow: 0 0 0 3px rgba(17, 18, 13, 0.12);
 }
 
 .guest-table-names {
@@ -2766,13 +2805,18 @@ p {
   font-weight: 800;
 }
 
-.rotation-control input {
+.rotation-control input,
+.rotation-control select {
   width: 70px;
   min-height: 34px;
   padding: 6px 8px;
   border: 1px solid #d8d8d8;
   border-radius: 8px;
   font: inherit;
+}
+
+.rotation-control select {
+  width: 132px;
 }
 
 .designer-selection {

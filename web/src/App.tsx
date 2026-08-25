@@ -65,6 +65,7 @@ type SearchResult = {
   publicToken: string;
   displayName: string;
   groupLabel: string;
+  notes?: string | null;
 };
 
 type PublicSeatResult = {
@@ -88,6 +89,7 @@ type FloorObject = {
   linkedTableId?: string | null;
   tableCode?: string | null;
   tableName?: string | null;
+  tableCapacity?: number | null;
   x: number;
   y: number;
   width: number;
@@ -364,6 +366,7 @@ type PublicEvent = {
   name: string;
   slug: string;
   eventType: string;
+  seatingAssignmentMode: "table" | "seat";
   subtitle: string;
   dateLabel: string;
   venueName: string;
@@ -500,6 +503,7 @@ const fallbackEvent: PublicEvent = {
   name: "Lichaa & Roula's Wedding",
   slug: defaultEventSlug,
   eventType: "Wedding",
+  seatingAssignmentMode: "seat",
   subtitle: "Together with their families, they welcome you to an evening of love, dinner, and dancing.",
   dateLabel: "Saturday, August 22",
   venueName: "The Olive Garden Venue",
@@ -555,13 +559,13 @@ const fallbackGuests: Guest[] = [
 
 const fallbackFloorObjects: FloorObject[] = [
   { id: "stage", type: "stage", label: "Stage", x: 0.35, y: 0.06, width: 0.38, height: 0.11, rotation: 0, shape: "rect" },
-  { id: "table-8", type: "table", label: "Table 8", x: 0.13, y: 0.25, width: 0.15, height: 0.15, rotation: 0, shape: "round" },
-  { id: "table-10", type: "table", label: "Table 10", x: 0.13, y: 0.53, width: 0.16, height: 0.16, rotation: 0, shape: "round" },
+  { id: "table-8", type: "table", label: "Table 8", tableCapacity: 8, x: 0.13, y: 0.25, width: 0.15, height: 0.15, rotation: 0, shape: "round" },
+  { id: "table-10", type: "table", label: "Table 10", tableCapacity: 8, x: 0.13, y: 0.53, width: 0.16, height: 0.16, rotation: 0, shape: "round" },
   { id: "dance", type: "dance", label: "Dance Floor", x: 0.42, y: 0.4, width: 0.28, height: 0.25, rotation: 0, shape: "rect" },
   { id: "bar", type: "bar", label: "Bar", x: 0.82, y: 0.27, width: 0.13, height: 0.25, rotation: 0, shape: "rect" },
-  { id: "table-12", type: "table", label: "Table 12", x: 0.76, y: 0.56, width: 0.15, height: 0.15, rotation: 0, shape: "round" },
+  { id: "table-12", type: "table", label: "Table 12", tableCapacity: 8, x: 0.76, y: 0.56, width: 0.15, height: 0.15, rotation: 0, shape: "round" },
   { id: "restroom", type: "restroom", label: "Toilets", x: 0.83, y: 0.69, width: 0.13, height: 0.12, rotation: 0, shape: "rect" },
-  { id: "table-14", type: "table", label: "Table 14", x: 0.75, y: 0.82, width: 0.16, height: 0.16, rotation: 0, shape: "round" },
+  { id: "table-14", type: "table", label: "Table 14", tableCapacity: 8, x: 0.75, y: 0.82, width: 0.16, height: 0.16, rotation: 0, shape: "round" },
   { id: "entrance", type: "entrance", label: "Entrance", x: 0.1, y: 0.83, width: 0.15, height: 0.09, rotation: 0, shape: "rect" },
 ];
 
@@ -575,6 +579,13 @@ const tableShapeOptions: Array<{ value: AdminTable["shape"]; label: string }> = 
   { value: "round", label: "Round" },
   { value: "square", label: "Square" },
   { value: "rectangle", label: "Rectangle" },
+  { value: "tear", label: "Tear shaped" },
+];
+const floorShapeOptions: Array<{ value: FloorObject["shape"]; label: string }> = [
+  { value: "rect", label: "Rectangle" },
+  { value: "round", label: "Round" },
+  { value: "square", label: "Square" },
+  { value: "rectangle", label: "Long rectangle" },
   { value: "tear", label: "Tear shaped" },
 ];
 const floorSectionTemplates: Array<Pick<FloorObject, "type" | "label" | "width" | "height" | "shape">> = [
@@ -735,6 +746,7 @@ function toFloorObjects(objects: any[] | undefined): FloorObject[] {
     linkedTableId: item.linkedTableId ?? null,
     tableCode: item.tableCode ?? null,
     tableName: item.tableName ?? null,
+    tableCapacity: item.tableCapacity == null ? null : normalizePersonCount(Number(item.tableCapacity)),
     x: Number(item.x),
     y: Number(item.y),
     width: Number(item.width),
@@ -765,6 +777,7 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
         linkedTableId: table.id,
         tableCode: table.number,
         tableName: table.name,
+        tableCapacity: table.maximumCapacity,
         shape: table.shape,
         rotation: existing.rotation ?? 0,
         seatLayout: existing.seatLayout ?? [],
@@ -781,6 +794,7 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
       linkedTableId: table.id,
       tableCode: table.number,
       tableName: table.name,
+      tableCapacity: table.maximumCapacity,
       x: 0.12 + (index % 4) * 0.18,
       y: 0.24 + Math.floor(index / 4) * 0.18,
       width: tableShapeDefaultWidth(table.shape),
@@ -1351,6 +1365,7 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
         publicToken: match.guest.publicToken,
         displayName: match.guest.displayName,
         groupLabel: match.guest.groupLabel,
+        notes: match.guest.directions,
       }));
   }, [query]);
 
@@ -1609,7 +1624,7 @@ function WelcomeScreen({ event, query, results, loading, apiOnline, searchTouche
           <section className="guest-results-list" aria-label="Search results">
             {results.map((guest) => (
               <button className="guest-result-minimal" key={guest.publicToken} type="button" onClick={() => onSelectGuest(guest)}>
-                {guest.displayName}
+                {guest.displayName}{guest.notes ? ` - ${guest.notes}` : ""}
               </button>
             ))}
           </section>
@@ -1626,7 +1641,7 @@ function WelcomeScreen({ event, query, results, loading, apiOnline, searchTouche
   );
 }
 
-function SeatScreen({ guest, floorObjects, message, sent, onBack, onMessageChange, onSendMessage }: {
+function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessageChange, onSendMessage }: {
   event: PublicEvent;
   guest: Guest;
   floorObjects: FloorObject[];
@@ -1645,11 +1660,11 @@ function SeatScreen({ guest, floorObjects, message, sent, onBack, onMessageChang
       <section className="guest-seat-content">
         <header className="guest-seat-hero">
           <h1>Welcome, {guest.displayName.split(" ")[0]}!</h1>
-          <p className="guest-table-assignment">You are on table <strong>{guest.tableCode}{guest.tableName ? ` - "${guest.tableName}"` : ""}</strong></p>
+          <p className="guest-table-assignment">You are on table <strong>{guest.tableCode}{guest.tableName ? ` - "${guest.tableName}"` : ""}{guest.seatNumber ? `, seat ${guest.seatNumber}` : ""}</strong></p>
           <span>Please find your way to your table</span>
         </header>
 
-        <GuestFloorPlan floorObjects={floorObjects} tableCode={guest.tableCode} />
+        <GuestFloorPlan floorObjects={floorObjects} tableCode={guest.tableCode} seatNumber={guest.seatNumber ?? null} showSeats={isSeatBasedEvent(event) || Boolean(guest.seatNumber)} />
 
         <section className="guest-table-names" aria-label={`Guests at table ${guest.tableCode}`}>
           <p>You can find on your table</p>
@@ -1688,7 +1703,7 @@ function MinimalFloorPlan({ tableCode }: { tableCode: string }) {
   );
 }
 
-function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject[]; tableCode: string }) {
+function GuestFloorPlan({ floorObjects, tableCode, seatNumber, showSeats }: { floorObjects: FloorObject[]; tableCode: string; seatNumber?: string | null; showSeats: boolean }) {
   const objects = floorObjects.length > 0 ? floorObjects : fallbackFloorObjects;
   const highlightedObject = objects.find((object) => object.type === "table" && (object.tableCode === tableCode || object.id === `table-${tableCode}`));
   const entranceObject = objects.find((object) => object.type === "entrance");
@@ -1708,6 +1723,9 @@ function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject
       </svg>
       {objects.map((object) => {
         const highlighted = object.id === highlightedObject.id;
+        const objectSeatNumbers = showSeats && object.type === "table"
+          ? seatNumbersForFloorObject(object, highlighted ? seatNumber : null)
+          : [];
         return (
           <div
             className={`guest-plan-object ${object.type} ${object.shape} ${highlighted ? "highlighted" : ""}`}
@@ -1722,7 +1740,22 @@ function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject
             }}
             aria-label={`${object.label}${highlighted ? ", your table" : ""}`}
           >
-            {object.type === "table" ? object.tableName || object.tableCode || object.label.replace(/^Table\s+/i, "") : object.label}
+            {objectSeatNumbers.length > 0 ? (
+              <div className="guest-table-seat-marker-layer" aria-hidden="true">
+                {objectSeatNumbers.map((currentSeatNumber, index, seats) => {
+                  const position = seatPositionForObject(object, currentSeatNumber, index, seats.length);
+                  const assigned = highlighted && seatNumber === currentSeatNumber;
+                  return (
+                    <span
+                      className={`guest-table-seat-marker ${assigned ? "assigned" : "unassigned"}`}
+                      key={currentSeatNumber}
+                      style={tableSeatMarkerStyle(position)}
+                    />
+                  );
+                })}
+              </div>
+            ) : null}
+            <span className="guest-plan-object-label">{object.type === "table" ? object.tableName || object.tableCode || object.label.replace(/^Table\s+/i, "") : object.label}</span>
           </div>
         );
       })}
@@ -2967,7 +3000,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   async function commitImport() {
     if (!token || !importPreview) return;
 
-    const validRows = importPreview.rows.filter((row) => row.errors.length === 0 && !row.isDuplicate);
+    const validRows = importPreview.rows.filter((row) => row.errors.length === 0);
     if (validRows.length === 0) {
       setError("No valid import rows to save.");
       return;
@@ -3056,6 +3089,35 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
     }
   }
 
+  async function bulkDeleteGuests() {
+    if (!token || selectedGuestIds.length === 0) return;
+    if (!window.confirm(`Delete ${selectedGuestIds.length} selected guests?`)) return;
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/bulk-delete`), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ guestIds: selectedGuestIds }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      setMessage(`${selectedGuestIds.length} guests deleted.`);
+      setSelectedGuestIds([]);
+      clearEventAdminCaches(event.id);
+      await loadGuests({ force: true });
+    } catch (bulkError) {
+      setError(bulkError instanceof Error ? bulkError.message : "Could not delete selected guests.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const activeGuests = guests.filter((guest) => guest.status === "Active");
   const seatingGuests = guests.filter((guest) => guest.status === "Active" || guest.status === "CheckedIn");
   const totalGuestPages = Math.max(1, Math.ceil(totalGuestCount / guestsPerPage));
@@ -3069,7 +3131,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   const duplicateGuests = guests.filter((guest) => guest.isDuplicate).length;
   const selectedGuest = guests.find((guest) => guest.id === selectedGuestId);
   const formTitle = formMode === "create" ? "Create new guest" : formMode === "edit" ? "Edit guest" : "Guest details";
-  const canSaveImport = importPreview ? importPreview.rows.some((row) => row.errors.length === 0 && !row.isDuplicate) : false;
+  const canSaveImport = importPreview ? importPreview.rows.some((row) => row.errors.length === 0) : false;
   const pageGuestIds = pagedGuests.map((guest) => guest.id);
   const pageSelected = pageGuestIds.length > 0 && pageGuestIds.every((id) => selectedGuestIds.includes(id));
   const paginationStart = Math.max(1, currentGuestPage - 2);
@@ -3118,6 +3180,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
           Import
         </button>
         {!seatBasedEvent ? <button className="secondary-button compact-button" type="button" onClick={() => setShowBulkAssignDialog(true)} disabled={saving || selectedGuestIds.length === 0}><Users aria-hidden="true" />Assign selected</button> : null}
+        <button className="secondary-button compact-button danger-button" type="button" onClick={() => void bulkDeleteGuests()} disabled={saving || selectedGuestIds.length === 0}><Trash2 aria-hidden="true" />Delete selected</button>
         <button className="primary-button create-object-button" type="button" onClick={startCreateGuest}><Plus aria-hidden="true" />Create new guest</button>
       </div>
 
@@ -3299,7 +3362,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                       <td data-label="Table">{row.tableNumber || "-"}<span>{row.tableName || ""}</span></td>
                       {seatBasedEvent ? <td data-label="Seat">{row.seatNumber ? `Seat ${row.seatNumber}` : "-"}</td> : null}
                       <td data-label="Notes">{row.notes || "-"}</td>
-                      <td data-label="Review">{row.errors.length ? <span className="guest-flag error"><FileWarning aria-hidden="true" />{row.errors.join(" ")}</span> : <span className="guest-flag ok"><Check aria-hidden="true" />Ready</span>}</td>
+                      <td data-label="Review">{row.errors.length ? <span className="guest-flag error"><FileWarning aria-hidden="true" />{row.errors.join(" ")}</span> : row.isDuplicate ? <span className="guest-flag warning"><FileWarning aria-hidden="true" />Possible duplicate. Will import.</span> : <span className="guest-flag ok"><Check aria-hidden="true" />Ready</span>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -3444,7 +3507,53 @@ function seatNumbersForTable(table: AdminTable) {
   return Array.from({ length: Math.max(1, table.maximumCapacity) }, (_, index) => String(index + 1));
 }
 
-function defaultSeatPosition(index: number, count: number): SeatLayoutPosition {
+function seatNumbersForFloorObject(object: FloorObject, minimumSeatNumber?: string | null) {
+  const minimumSeat = Number(minimumSeatNumber);
+  const layoutMaxSeat = Math.max(0, ...(object.seatLayout ?? []).map((position) => Number(position.seatNumber)).filter(Number.isFinite));
+  const seatCount = Math.max(
+    Number(object.tableCapacity ?? 0),
+    layoutMaxSeat,
+    Number.isFinite(minimumSeat) ? minimumSeat : 0,
+  );
+
+  if (seatCount <= 0) return [];
+  return Array.from({ length: normalizePersonCount(seatCount) }, (_, index) => String(index + 1));
+}
+
+function defaultSeatPosition(object: FloorObject, index: number, count: number): SeatLayoutPosition {
+  if (object.shape === "rectangle" || object.shape === "rect") {
+    const seatsPerSide = Math.ceil(count / 2);
+    const onFirstSide = index < seatsPerSide;
+    const sideIndex = onFirstSide ? index : index - seatsPerSide;
+    const sideCount = onFirstSide ? seatsPerSide : count - seatsPerSide;
+    const offset = sideCount <= 1 ? 50 : 14 + (sideIndex / (sideCount - 1)) * 72;
+
+    if (object.width >= object.height) {
+      return {
+        seatNumber: String(index + 1),
+        x: offset,
+        y: onFirstSide ? -8 : 108,
+      };
+    }
+
+    return {
+      seatNumber: String(index + 1),
+      x: onFirstSide ? -8 : 108,
+      y: offset,
+    };
+  }
+
+  if (object.shape === "square") {
+    const side = Math.floor((index / Math.max(1, count)) * 4);
+    const sideSlotCount = Math.ceil(count / 4);
+    const sideIndex = index % sideSlotCount;
+    const offset = sideSlotCount <= 1 ? 50 : 14 + (sideIndex / (sideSlotCount - 1)) * 72;
+    if (side === 0) return { seatNumber: String(index + 1), x: offset, y: -8 };
+    if (side === 1) return { seatNumber: String(index + 1), x: 108, y: offset };
+    if (side === 2) return { seatNumber: String(index + 1), x: 100 - offset, y: 108 };
+    return { seatNumber: String(index + 1), x: -8, y: 100 - offset };
+  }
+
   const angle = (index / Math.max(1, count)) * Math.PI * 2 - Math.PI / 2;
   const radiusX = 58;
   const radiusY = 58;
@@ -3458,7 +3567,7 @@ function defaultSeatPosition(index: number, count: number): SeatLayoutPosition {
 
 function seatPositionForObject(object: FloorObject, seatNumber: string, index: number, count: number) {
   return object.seatLayout?.find((position) => position.seatNumber === seatNumber) ?? {
-    ...defaultSeatPosition(index, count),
+    ...defaultSeatPosition(object, index, count),
     seatNumber,
   };
 }
@@ -3963,6 +4072,26 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       : object));
   }
 
+  function setSelectedObjectShape(shape: FloorObject["shape"]) {
+    if (!selectedObjectId) return;
+
+    setFloorObjects((current) => current.map((object) => {
+      if (object.id !== selectedObjectId || object.type === "table") return object;
+      const nextShape = normalizeFloorShape(shape);
+      const wasWide = object.width >= object.height;
+      return {
+        ...object,
+        shape: nextShape,
+        width: nextShape === "round" || nextShape === "square" || nextShape === "tear"
+          ? Math.max(0.08, Math.min(1, Math.min(object.width, object.height)))
+          : object.width,
+        height: nextShape === "round" || nextShape === "square" || nextShape === "tear"
+          ? Math.max(0.08, Math.min(1, Math.min(object.width, object.height)))
+          : nextShape === "rectangle" && !wasWide ? Math.max(object.height, object.width) : object.height,
+      };
+    }));
+  }
+
   function resetSelectedSeatLayout() {
     if (!selectedObjectId) return;
 
@@ -4312,6 +4441,14 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                 <label className="rotation-control">
                   <span>Angle</span>
                   <input type="number" min="0" max="359" value={normalizeRotation(selectedObject.rotation ?? 0)} onChange={(formEvent) => setSelectedObjectRotation(Number(formEvent.target.value))} />
+                </label>
+              ) : null}
+              {selectedObject && selectedObject.type !== "table" ? (
+                <label className="rotation-control">
+                  <span>Shape</span>
+                  <select value={selectedObject.shape} onChange={(formEvent) => setSelectedObjectShape(formEvent.target.value as FloorObject["shape"])}>
+                    {floorShapeOptions.map((shape) => <option key={shape.value} value={shape.value}>{shape.label}</option>)}
+                  </select>
                 </label>
               ) : null}
               {seatBasedEvent && selectedTable ? <button className="secondary-button compact-button" type="button" onClick={resetSelectedSeatLayout}>Reset seats</button> : null}

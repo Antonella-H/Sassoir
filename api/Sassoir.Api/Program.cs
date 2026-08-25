@@ -436,6 +436,19 @@ app.MapDelete("/api/admin/events/{eventId:guid}/guests/{guestId:guid}", (Guid ev
     return store.DeleteGuest(eventId, guestId) ? Results.NoContent() : Results.NotFound();
 });
 
+app.MapPost("/api/admin/events/{eventId:guid}/guests/bulk-delete", (Guid eventId, BulkGuestRequest deleteRequest, HttpRequest request, AuthStore auth, EventStore store) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+
+    var result = store.BulkDeleteGuests(eventId, deleteRequest.GuestIds);
+    return result.Error switch
+    {
+        "not-found" => Results.NotFound(),
+        not null => Results.BadRequest(new { message = result.Error }),
+        _ => Results.Ok(new { deletedCount = result.DeletedCount })
+    };
+});
+
 app.MapPost("/api/admin/events/{eventId:guid}/guests/{guestId:guid}/assign-table", (Guid eventId, Guid guestId, AssignGuestTableRequest assignment, HttpRequest request, AuthStore auth, EventStore store) =>
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
@@ -973,6 +986,7 @@ namespace Sassoir.Api.Data
                         item.Name,
                         item.Slug,
                         item.EventType,
+                        item.SeatingAssignmentMode,
                         item.Subtitle,
                         item.DateLabel,
                         item.VenueName,
@@ -1047,6 +1061,10 @@ namespace Sassoir.Api.Data
                                 TableName = _db.EventTables
                                     .Where(table => table.Id == floorObject.LinkedTableId)
                                     .Select(table => table.Name)
+                                    .FirstOrDefault(),
+                                TableCapacity = _db.EventTables
+                                    .Where(table => table.Id == floorObject.LinkedTableId)
+                                    .Select(table => (int?)table.Capacity)
                                     .FirstOrDefault()
                             })
                             .ToArray()
@@ -1066,6 +1084,7 @@ namespace Sassoir.Api.Data
                                 null,
                                 item.TableCode,
                                 item.TableName,
+                                item.TableCapacity,
                                 item.X,
                                 item.Y,
                                 item.Width,
@@ -1108,7 +1127,7 @@ namespace Sassoir.Api.Data
                 .OrderBy(match => match.Rank)
                 .ThenBy(match => match.Guest.DisplayName)
                 .Take(5)
-                .Select(match => new GuestSearchResultDto(match.Guest.PublicToken, match.Guest.DisplayName, match.Guest.GroupLabel))
+                .Select(match => new GuestSearchResultDto(match.Guest.PublicToken, match.Guest.DisplayName, match.Guest.GroupLabel, match.Guest.Notes ?? string.Empty))
                 .ToArray();
 
             return guests;
@@ -1126,7 +1145,7 @@ namespace Sassoir.Api.Data
                 .SingleOrDefaultAsync(cancellationToken);
             if (eventId is null) return [];
 
-            return await _db.Guests
+            var matches = await _db.Guests
                 .AsNoTracking()
                 .Where(item => item.EventId == eventId && item.Status == GuestStatus.Active)
                 .Where(item =>
@@ -1142,9 +1161,49 @@ namespace Sassoir.Api.Data
                     item.NormalizedSearchName.Contains(normalizedQuery) ? 4 : 5)
                 .ThenBy(item => item.DisplayName)
                 .ThenBy(item => item.PublicToken)
-                .Select(item => new GuestSearchResultDto(item.PublicToken, item.DisplayName, string.Empty))
-                .Take(10)
+                .Select(item => new
+                {
+                    item.PublicToken,
+                    item.DisplayName,
+                    item.NormalizedSearchName,
+                    item.Notes,
+                    TableCode = item.Table == null ? string.Empty : item.Table.Code,
+                    TableName = item.Table == null ? string.Empty : item.Table.Name
+                })
+                .Take(25)
                 .ToArrayAsync(cancellationToken);
+
+            var matchedNames = matches
+                .Select(item => item.NormalizedSearchName)
+                .Where(item => item != string.Empty)
+                .Distinct()
+                .ToArray();
+            var duplicateKeys = matchedNames.Length == 0
+                ? new HashSet<string>(StringComparer.Ordinal)
+                : (await _db.Guests
+                    .AsNoTracking()
+                    .Where(item => item.EventId == eventId && item.Status == GuestStatus.Active && matchedNames.Contains(item.NormalizedSearchName))
+                    .GroupBy(item => item.NormalizedSearchName)
+                    .Where(group => group.Count() > 1)
+                    .Select(group => group.Key)
+                    .ToArrayAsync(cancellationToken))
+                    .ToHashSet(StringComparer.Ordinal);
+
+            return matches
+                .Take(10)
+                .Select(item =>
+                {
+                    var isDuplicate = duplicateKeys.Contains(item.NormalizedSearchName);
+                    var note = isDuplicate
+                        ? !string.IsNullOrWhiteSpace(item.Notes)
+                            ? item.Notes.Trim()
+                            : !string.IsNullOrWhiteSpace(item.TableCode)
+                                ? $"Table {item.TableCode}{(!string.IsNullOrWhiteSpace(item.TableName) ? $" - {item.TableName}" : string.Empty)}"
+                                : string.Empty
+                        : string.Empty;
+                    return new GuestSearchResultDto(item.PublicToken, item.DisplayName, string.Empty, note);
+                })
+                .ToArray();
         }
 
         public SeatResultDto? GetPublicGuestSeat(string slug, string publicToken)
@@ -1324,7 +1383,7 @@ namespace Sassoir.Api.Data
                 .Distinct()
                 .ToArray();
 
-            var tableLookup = new Dictionary<Guid, (string Code, string Name)>();
+            var tableLookup = new Dictionary<Guid, (string Code, string Name, int Capacity)>();
             if (linkedTableIds.Length > 0)
             {
                 var linkedTables = await _db.EventTables
@@ -1334,11 +1393,12 @@ namespace Sassoir.Api.Data
                     {
                         item.Id,
                         item.Code,
-                        item.Name
+                        item.Name,
+                        item.Capacity
                     })
                     .ToArrayAsync(cancellationToken);
 
-                tableLookup = linkedTables.ToDictionary(item => item.Id, item => (item.Code, item.Name));
+                tableLookup = linkedTables.ToDictionary(item => item.Id, item => (item.Code, item.Name, item.Capacity));
             }
 
             return new FloorPlanDto(
@@ -1358,6 +1418,7 @@ namespace Sassoir.Api.Data
                             item.LinkedTableId,
                             linkedTable.Code,
                             linkedTable.Name,
+                            linkedTable.Capacity == 0 ? null : linkedTable.Capacity,
                             item.X,
                             item.Y,
                             item.Width,
@@ -1748,6 +1809,23 @@ namespace Sassoir.Api.Data
             return true;
         }
 
+        public (int DeletedCount, string? Error) BulkDeleteGuests(Guid eventId, IReadOnlyList<Guid> guestIds)
+        {
+            if (!_db.Events.Any(item => item.Id == eventId)) return (0, "not-found");
+
+            var uniqueGuestIds = guestIds.Distinct().ToArray();
+            if (uniqueGuestIds.Length == 0) return (0, null);
+
+            var guests = _db.Guests
+                .Where(item => item.EventId == eventId && uniqueGuestIds.Contains(item.Id))
+                .ToArray();
+            if (guests.Length != uniqueGuestIds.Length) return (0, "not-found");
+
+            _db.Guests.RemoveRange(guests);
+            _db.SaveChanges();
+            return (guests.Length, null);
+        }
+
         public (AdminGuestDto? Guest, string? Error) AssignGuestToTable(Guid eventId, Guid guestId, Guid? tableId, string? seatNumber)
         {
             var guest = _db.Guests.Include(item => item.Table).SingleOrDefault(item => item.Id == guestId && item.EventId == eventId);
@@ -1861,7 +1939,6 @@ namespace Sassoir.Api.Data
             }
 
             var guests = preview.Preview.Rows
-                .Where(item => !item.IsDuplicate)
                 .Select(item =>
                 {
                     var guest = BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes, item.PersonCount);
@@ -2350,6 +2427,7 @@ namespace Sassoir.Api.Data
                 eventEntity.Name,
                 eventEntity.Slug,
                 eventEntity.EventType,
+                eventEntity.SeatingAssignmentMode,
                 eventEntity.Subtitle,
                 eventEntity.DateLabel,
                 eventEntity.VenueName,
@@ -2397,6 +2475,7 @@ namespace Sassoir.Api.Data
                             item.LinkedTableId,
                             linkedTable?.Code,
                             linkedTable?.Name,
+                            linkedTable?.Capacity,
                             item.X,
                             item.Y,
                             item.Width,
@@ -2552,10 +2631,6 @@ namespace Sassoir.Api.Data
             }
 
             var isDuplicate = duplicateInFile || existingKeys.Contains(duplicateKey);
-            if (isDuplicate)
-            {
-                errors.Add("Possible duplicate guest.");
-            }
 
             if (!string.IsNullOrWhiteSpace(tableNumber) && !tablesByCode.TryGetValue(tableNumber, out table))
             {
@@ -3340,6 +3415,7 @@ namespace Sassoir.Api.Models
         Guid? LinkedTableId,
         string? TableCode,
         string? TableName,
+        int? TableCapacity,
         decimal X,
         decimal Y,
         decimal Width,
@@ -3397,6 +3473,8 @@ namespace Sassoir.Api.Models
 
     public sealed record BulkAssignGuestTableRequest(IReadOnlyList<Guid> GuestIds, Guid? TableId);
 
+    public sealed record BulkGuestRequest(IReadOnlyList<Guid> GuestIds);
+
     public sealed record AdminTableDto(Guid Id, string Name, string Number, int MaximumCapacity, int AssignedGuestCount, string Shape, string Notes);
 
     public sealed record AdminTableCreateRequest(string Name, string Number, int MaximumCapacity, string? Shape, string? Notes);
@@ -3423,7 +3501,7 @@ namespace Sassoir.Api.Models
 
     public sealed record GuestSearchResponse(IReadOnlyCollection<GuestSearchResultDto> Results);
 
-    public sealed record GuestSearchResultDto(string PublicToken, string DisplayName, string GroupLabel);
+    public sealed record GuestSearchResultDto(string PublicToken, string DisplayName, string GroupLabel, string Notes);
 
     public sealed record AdminEventUpsertRequest(
         string Name,
@@ -3472,6 +3550,7 @@ namespace Sassoir.Api.Models
         string Name,
         string Slug,
         string EventType,
+        string SeatingAssignmentMode,
         string Subtitle,
         string DateLabel,
         string VenueName,
@@ -3525,6 +3604,7 @@ namespace Sassoir.Api.Models
                 eventDetails.Name,
                 eventDetails.Slug,
                 eventDetails.EventType,
+                eventDetails.SeatingAssignmentMode,
                 eventDetails.Subtitle,
                 eventDetails.DateLabel,
                 eventDetails.VenueName,
@@ -3562,7 +3642,7 @@ namespace Sassoir.Api.Models
 
         public static GuestSearchResultDto ToSearchDto(this Guest guest)
         {
-            return new GuestSearchResultDto(guest.PublicToken, guest.DisplayName, guest.GroupLabel);
+            return new GuestSearchResultDto(guest.PublicToken, guest.DisplayName, guest.GroupLabel, string.Empty);
         }
 
         public static SeatResultDto ToSeatDto(this Guest guest, EventDetails eventDetails)
