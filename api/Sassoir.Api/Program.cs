@@ -1976,10 +1976,11 @@ namespace Sassoir.Api.Data
                 return (null, "Resolve import errors before saving guests.");
             }
 
+            var reservedTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var guests = preview.Preview.Rows
                 .Select(item =>
                 {
-                    var guest = BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes, item.PersonCount);
+                    var guest = BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes, item.PersonCount, reservedTokens);
                     guest.TableId = item.TableId;
                     guest.SeatNumber = item.TableId is null ? null : item.SeatNumber;
                     return guest;
@@ -2596,7 +2597,7 @@ namespace Sassoir.Api.Data
             return floorPlan;
         }
 
-        private GuestEntity BuildGuest(Guid eventId, string? firstNameValue, string? lastNameValue, string? displayNameValue, string? notesValue, int? personCountValue)
+        private GuestEntity BuildGuest(Guid eventId, string? firstNameValue, string? lastNameValue, string? displayNameValue, string? notesValue, int? personCountValue, HashSet<string>? reservedTokens = null)
         {
             var firstName = firstNameValue?.Trim() ?? string.Empty;
             var lastName = lastNameValue?.Trim() ?? string.Empty;
@@ -2610,7 +2611,7 @@ namespace Sassoir.Api.Data
                 LastName = lastName,
                 DisplayName = displayName,
                 NormalizedSearchName = SearchNormalizer.Normalize(displayName),
-                PublicToken = BuildGuestToken(displayName),
+                PublicToken = BuildGuestToken(displayName, reservedTokens),
                 Notes = notesValue?.Trim(),
                 PersonCount = NormalizePersonCount(personCountValue),
                 Status = GuestStatus.Active,
@@ -2619,16 +2620,17 @@ namespace Sassoir.Api.Data
             };
         }
 
-        private string BuildGuestToken(string displayName)
+        private string BuildGuestToken(string displayName, HashSet<string>? reservedTokens = null)
         {
             var tokenBase = Slugify(displayName);
             var token = $"guest-{tokenBase}";
             var suffix = 2;
-            while (_db.Guests.Any(item => item.PublicToken == token))
+            while ((reservedTokens?.Contains(token) ?? false) || _db.Guests.Any(item => item.PublicToken == token))
             {
                 token = $"guest-{tokenBase}-{suffix++}";
             }
 
+            reservedTokens?.Add(token);
             return token;
         }
 
