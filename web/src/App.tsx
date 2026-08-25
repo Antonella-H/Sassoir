@@ -1653,6 +1653,7 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const tableGuests = guest.companions.length > 0 ? guest.companions : [guest.groupLabel].filter(Boolean);
+  const tableLabel = guest.tableName || guest.tableCode;
 
   return (
     <div className="app-screen guest-seat-screen">
@@ -1661,7 +1662,7 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
       <section className="guest-seat-content">
         <header className="guest-seat-hero">
           <h1>Welcome, {guest.displayName.split(" ")[0]}!</h1>
-          <p className="guest-table-assignment">You are on table <strong>{guest.tableCode}{guest.tableName ? ` - "${guest.tableName}"` : ""}{guest.seatNumber ? `, seat ${guest.seatNumber}` : ""}</strong></p>
+          <p className="guest-table-assignment">You are on table <strong>{tableLabel}{guest.seatNumber ? `, seat ${guest.seatNumber}` : ""}</strong></p>
           <span>Please find your way to your table</span>
         </header>
 
