@@ -2976,13 +2976,13 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       const rows = parseGuestCsv(await file.text());
       if (rows.length === 0) throw new Error("No guest rows were found in the import file.");
 
-      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/import/preview`), {
+      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/import/preview-csv`), {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "text/csv",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ guests: rows }),
+        body: rowsToGuestImportCsv(rows),
       });
       if (!response.ok) throw new Error(await readError(response));
 
@@ -2991,7 +2991,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       setImportRows(payload.rows);
       setMessage(`${payload.rows.length} rows reviewed. Fix errors before saving.`);
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "Could not preview import.");
+      setError(importFailureMessage(importError, "Could not preview import."));
     } finally {
       setSaving(false);
     }
@@ -3011,13 +3011,13 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
     setMessage("");
 
     try {
-      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/import/commit`), {
+      const response = await fetch(apiUrl(`/api/admin/events/${event.id}/guests/import/commit-csv`), {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "text/csv",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ guests: validRows }),
+        body: rowsToGuestImportCsv(validRows),
       });
       if (!response.ok) throw new Error(await readError(response));
 
@@ -3027,7 +3027,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
       clearEventAdminCaches(event.id);
       await loadGuests({ force: true });
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "Could not import guests.");
+      setError(importFailureMessage(importError, "Could not import guests."));
     } finally {
       setSaving(false);
     }
@@ -3671,6 +3671,31 @@ function parseCsv(text: string) {
 
 function csvCell(value: string) {
   return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
+function rowsToGuestImportCsv(rows: Array<Pick<ImportPreviewRow, "firstName" | "lastName" | "displayName" | "personCount" | "tableNumber" | "tableName" | "seatNumber" | "notes">>) {
+  const lines = ["First Name,Last Name,Display Name,Person Count,Table Number,Table Name,Seat Number,Notes"];
+  rows.forEach((row) => {
+    lines.push([
+      row.firstName,
+      row.lastName,
+      row.displayName,
+      String(normalizePersonCount(row.personCount)),
+      row.tableNumber,
+      row.tableName,
+      row.seatNumber ?? "",
+      row.notes,
+    ].map((value) => csvCell(value ?? "")).join(","));
+  });
+  return `${lines.join("\n")}\n`;
+}
+
+function importFailureMessage(error: unknown, fallback: string) {
+  if (error instanceof TypeError && /fetch/i.test(error.message)) {
+    return `${fallback}. The live API could not be reached for this import batch. Please try again; if it only happens with a large list, split the CSV into smaller files.`;
+  }
+
+  return error instanceof Error ? error.message : fallback;
 }
 
 function emptyTableDraft(): AdminTableDraft {

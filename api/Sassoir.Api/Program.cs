@@ -488,6 +488,21 @@ app.MapPost("/api/admin/events/{id:guid}/guests/import/preview", (Guid id, Admin
     };
 });
 
+app.MapPost("/api/admin/events/{id:guid}/guests/import/preview-csv", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+
+    using var reader = new StreamReader(request.Body, Encoding.UTF8);
+    var csv = await reader.ReadToEndAsync(cancellationToken);
+    var result = store.PreviewGuestImportCsv(id, csv);
+    return result.Error switch
+    {
+        "not-found" => Results.NotFound(),
+        not null => Results.BadRequest(new { message = result.Error }),
+        _ => Results.Ok(result.Preview)
+    };
+});
+
 app.MapPost("/api/admin/events/{id:guid}/guests/import/commit", (Guid id, AdminGuestImportRequest import, HttpRequest request, AuthStore auth, EventStore store) =>
 {
     if (!auth.IsAdmin(request)) return Results.Unauthorized();
@@ -498,6 +513,21 @@ app.MapPost("/api/admin/events/{id:guid}/guests/import/commit", (Guid id, AdminG
         "not-found" => Results.NotFound(),
         not null => Results.BadRequest(new { message = result.Error }),
         _ => Results.Created($"/api/admin/events/{id}/guests", result.Guests)
+    };
+});
+
+app.MapPost("/api/admin/events/{id:guid}/guests/import/commit-csv", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, CancellationToken cancellationToken) =>
+{
+    if (!auth.IsAdmin(request)) return Results.Unauthorized();
+
+    using var reader = new StreamReader(request.Body, Encoding.UTF8);
+    var csv = await reader.ReadToEndAsync(cancellationToken);
+    var result = store.ImportGuestsCsv(id, csv);
+    return result.Error switch
+    {
+        "not-found" => Results.NotFound(),
+        not null => Results.BadRequest(new { message = result.Error }),
+        _ => Results.Ok(result.Guests)
     };
 });
 
@@ -1927,6 +1957,14 @@ namespace Sassoir.Api.Data
             return (new AdminGuestImportPreviewDto(previewRows, previewRows.Count(item => item.Errors.Length > 0), previewRows.Count(item => item.IsDuplicate)), null);
         }
 
+        public (AdminGuestImportPreviewDto? Preview, string? Error) PreviewGuestImportCsv(Guid eventId, string csv)
+        {
+            var rows = ParseGuestImportCsv(csv);
+            if (rows.Length == 0) return (null, "No guest rows were found in the import file.");
+
+            return PreviewGuestImport(eventId, rows);
+        }
+
         public (IReadOnlyList<AdminGuestDto>? Guests, string? Error) ImportGuests(Guid eventId, IReadOnlyList<AdminGuestImportRow> rows)
         {
             var preview = PreviewGuestImport(eventId, rows);
@@ -1951,6 +1989,14 @@ namespace Sassoir.Api.Data
             _db.Guests.AddRange(guests);
             _db.SaveChanges();
             return (guests.Select(item => ToAdminGuestDto(item)).ToArray(), null);
+        }
+
+        public (IReadOnlyList<AdminGuestDto>? Guests, string? Error) ImportGuestsCsv(Guid eventId, string csv)
+        {
+            var rows = ParseGuestImportCsv(csv);
+            if (rows.Length == 0) return (null, "No guest rows were found in the import file.");
+
+            return ImportGuests(eventId, rows);
         }
 
         public string ExportGuestsCsv(Guid eventId)
@@ -2682,6 +2728,95 @@ namespace Sassoir.Api.Data
             }
 
             return new AdminGuestImportRowDto(row.RowNumber ?? fallbackRowNumber, firstName, lastName, displayName, notes, personCount, table?.Id, tableNumber, tableName, seatNumber, isDuplicate, errors.ToArray());
+        }
+
+        private static AdminGuestImportRow[] ParseGuestImportCsv(string text)
+        {
+            var rows = ParseCsv(text).Where(row => row.Any(cell => !string.IsNullOrWhiteSpace(cell))).ToArray();
+            if (rows.Length <= 1) return [];
+
+            var headers = rows[0].Select(NormalizeCsvHeader).ToArray();
+            var dataRows = rows.Skip(1).ToArray();
+            return dataRows
+                .Select((row, index) =>
+                {
+                    string Value(params string[] names)
+                    {
+                        var headerIndex = Array.FindIndex(headers, header => names.Contains(header));
+                        return headerIndex >= 0 && headerIndex < row.Length ? row[headerIndex].Trim() : string.Empty;
+                    }
+
+                    return new AdminGuestImportRow(
+                        index + 2,
+                        Value("firstname", "first", "first_name"),
+                        Value("lastname", "last", "last_name", "surname"),
+                        Value("displayname", "display", "name", "fullname"),
+                        Value("notes", "note", "comment", "comments"),
+                        int.TryParse(Value("personcount", "people", "persons", "partysize", "party", "numberofpersons", "numberofperson"), out var personCount) ? personCount : null,
+                        Value("tablenumber", "table", "tablecode", "assignedtable", "assignedtablenumber"),
+                        Value("tablename", "assignedtablename"),
+                        Value("seatnumber", "seat", "assignedseat", "assignedseatnumber"));
+                })
+                .Where(row => !string.IsNullOrWhiteSpace(row.FirstName) || !string.IsNullOrWhiteSpace(row.LastName) || !string.IsNullOrWhiteSpace(row.DisplayName))
+                .ToArray();
+        }
+
+        private static string[][] ParseCsv(string text)
+        {
+            var rows = new List<string[]>();
+            var row = new List<string>();
+            var cell = new StringBuilder();
+            var inQuotes = false;
+
+            for (var index = 0; index < text.Length; index++)
+            {
+                var current = text[index];
+                if (current == '"')
+                {
+                    if (inQuotes && index + 1 < text.Length && text[index + 1] == '"')
+                    {
+                        cell.Append('"');
+                        index++;
+                    }
+                    else
+                    {
+                        inQuotes = !inQuotes;
+                    }
+                    continue;
+                }
+
+                if (current == ',' && !inQuotes)
+                {
+                    row.Add(cell.ToString());
+                    cell.Clear();
+                    continue;
+                }
+
+                if ((current == '\r' || current == '\n') && !inQuotes)
+                {
+                    if (current == '\r' && index + 1 < text.Length && text[index + 1] == '\n') index++;
+                    row.Add(cell.ToString());
+                    cell.Clear();
+                    rows.Add(row.ToArray());
+                    row.Clear();
+                    continue;
+                }
+
+                cell.Append(current);
+            }
+
+            row.Add(cell.ToString());
+            if (row.Any(value => !string.IsNullOrWhiteSpace(value))) rows.Add(row.ToArray());
+            return rows.ToArray();
+        }
+
+        private static string NormalizeCsvHeader(string value)
+        {
+            return new string(value
+                .Trim()
+                .ToLowerInvariant()
+                .Where(char.IsLetterOrDigit)
+                .ToArray());
         }
 
         private static string DuplicateKey(GuestEntity guest)
