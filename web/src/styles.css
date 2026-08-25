@@ -2670,6 +2670,8 @@ p {
   text-transform: uppercase;
   user-select: none;
   touch-action: none;
+  overflow: visible;
+  transform-origin: center;
 }
 
 .floor-designer-object.round {
@@ -2711,9 +2713,66 @@ p {
   background: #f5f3ee;
 }
 
-.floor-designer-object span {
+.floor-object-label {
+  position: relative;
+  z-index: 2;
   padding: 4px;
   overflow-wrap: anywhere;
+}
+
+.table-seat-marker-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.table-seat-marker {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  border: 2px solid #fff;
+  border-radius: 5px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.32);
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.floor-designer-object.round .table-seat-marker {
+  border-radius: 50%;
+}
+
+.table-seat-marker.filled {
+  background: #16a34a;
+}
+
+.table-seat-marker.empty {
+  background: #dc2626;
+}
+
+.table-seat-marker.selected {
+  outline: 3px solid rgba(245, 158, 11, 0.85);
+  outline-offset: 2px;
+}
+
+.rotation-control {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #69696e;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.rotation-control input {
+  width: 70px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid #d8d8d8;
+  border-radius: 8px;
+  font: inherit;
 }
 
 .designer-selection {

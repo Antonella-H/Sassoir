@@ -164,6 +164,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.Rotation).HasColumnName("rotation");
             entity.Property(item => item.Shape).HasColumnName("shape");
             entity.Property(item => item.ZIndex).HasColumnName("z_index");
+            entity.Property(item => item.SeatLayout).HasColumnName("seat_layout");
             entity.Property(item => item.IsVisible).HasColumnName("is_visible");
         });
 
@@ -372,6 +373,7 @@ public sealed class FloorPlanObjectEntity
     public decimal Rotation { get; set; }
     public string Shape { get; set; } = "rect";
     public int ZIndex { get; set; }
+    public string SeatLayout { get; set; } = "[]";
     public bool IsVisible { get; set; } = true;
     public FloorPlanEntity? FloorPlan { get; set; }
 }

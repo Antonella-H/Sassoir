@@ -842,6 +842,7 @@ namespace Sassoir.Api.Data
                   rotation numeric(8, 3) not null default 0,
                   shape text not null default 'rect',
                   z_index integer not null default 0,
+                  seat_layout text not null default '[]',
                   is_visible boolean not null default true
                 );
 
@@ -910,6 +911,7 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_app_users_email on app_users(email);
 
                 alter table events add column if not exists seating_assignment_mode text not null default 'table';
+                alter table floor_plan_objects add column if not exists seat_layout text not null default '[]';
             """);
         }
     }
@@ -920,6 +922,7 @@ namespace Sassoir.Api.Data
         private readonly IMemoryCache _cache;
         private readonly ILogger<EventStore> _logger;
         private static readonly TimeSpan PublicCacheTtl = TimeSpan.FromMinutes(5);
+        private static readonly JsonSerializerOptions SeatLayoutJsonOptions = new(JsonSerializerDefaults.Web);
 
         public EventStore(SassoirDbContext db, IMemoryCache cache, ILogger<EventStore> logger)
         {
@@ -1033,8 +1036,10 @@ namespace Sassoir.Api.Data
                                 floorObject.Y,
                                 floorObject.Width,
                                 floorObject.Height,
+                                floorObject.Rotation,
                                 floorObject.Shape,
                                 floorObject.ZIndex,
+                                floorObject.SeatLayout,
                                 TableCode = _db.EventTables
                                     .Where(table => table.Id == floorObject.LinkedTableId)
                                     .Select(table => table.Code)
@@ -1065,8 +1070,10 @@ namespace Sassoir.Api.Data
                                 item.Y,
                                 item.Width,
                                 item.Height,
+                                item.Rotation,
                                 item.Shape,
-                                item.ZIndex))
+                                item.ZIndex,
+                                ReadSeatLayout(item.SeatLayout)))
                             .ToArray());
             });
         }
@@ -1303,8 +1310,10 @@ namespace Sassoir.Api.Data
                     item.Y,
                     item.Width,
                     item.Height,
+                    item.Rotation,
                     item.Shape,
-                    item.ZIndex
+                    item.ZIndex,
+                    item.SeatLayout
                 })
                 .ToArrayAsync(cancellationToken);
 
@@ -1353,8 +1362,10 @@ namespace Sassoir.Api.Data
                             item.Y,
                             item.Width,
                             item.Height,
+                            item.Rotation,
                             item.Shape,
-                            item.ZIndex);
+                            item.ZIndex,
+                            ReadSeatLayout(item.SeatLayout));
                     })
                     .ToArray());
         }
@@ -1800,16 +1811,39 @@ namespace Sassoir.Api.Data
         {
             if (!_db.Events.Any(item => item.Id == eventId)) return (null, "not-found");
 
+            var seatingMode = GetEventSeatingAssignmentMode(eventId);
+            var tables = _db.EventTables
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId)
+                .ToArray();
+            var tablesByCode = tables.ToDictionary(item => item.Code.Trim(), StringComparer.OrdinalIgnoreCase);
+            var tablesByName = tables
+                .Where(item => !string.IsNullOrWhiteSpace(item.Name))
+                .GroupBy(item => item.Name.Trim(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
             var existingKeys = _db.Guests
                 .AsNoTracking()
                 .Where(item => item.EventId == eventId)
                 .Select(item => item.NormalizedSearchName)
                 .Where(item => item != string.Empty)
                 .ToHashSet(StringComparer.Ordinal);
+            var assignedCountsByTable = _db.Guests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId && item.TableId != null && (item.Status == GuestStatus.Active || item.Status == GuestStatus.CheckedIn))
+                .GroupBy(item => item.TableId!.Value)
+                .ToDictionary(
+                    group => group.Key,
+                    group => seatingMode == "seat" ? group.Count() : group.Sum(item => Math.Max(1, item.PersonCount)));
+            var occupiedSeats = _db.Guests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId && item.TableId != null && item.SeatNumber != null && item.SeatNumber != string.Empty && (item.Status == GuestStatus.Active || item.Status == GuestStatus.CheckedIn))
+                .Select(item => $"{item.TableId}:{item.SeatNumber}")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var seenKeys = new Dictionary<string, int>(StringComparer.Ordinal);
+            var seenSeatKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var previewRows = rows
-                .Select((row, index) => BuildImportPreviewRow(row, index + 2, existingKeys, seenKeys))
+                .Select((row, index) => BuildImportPreviewRow(row, index + 2, existingKeys, seenKeys, tablesByCode, tablesByName, assignedCountsByTable, occupiedSeats, seenSeatKeys, seatingMode))
                 .ToArray();
 
             return (new AdminGuestImportPreviewDto(previewRows, previewRows.Count(item => item.Errors.Length > 0), previewRows.Count(item => item.IsDuplicate)), null);
@@ -1828,7 +1862,13 @@ namespace Sassoir.Api.Data
 
             var guests = preview.Preview.Rows
                 .Where(item => !item.IsDuplicate)
-                .Select(item => BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes, item.PersonCount))
+                .Select(item =>
+                {
+                    var guest = BuildGuest(eventId, item.FirstName, item.LastName, item.DisplayName, item.Notes, item.PersonCount);
+                    guest.TableId = item.TableId;
+                    guest.SeatNumber = item.TableId is null ? null : item.SeatNumber;
+                    return guest;
+                })
                 .ToArray();
 
             _db.Guests.AddRange(guests);
@@ -1964,6 +2004,7 @@ namespace Sassoir.Api.Data
                 Height = ShapeDefaultHeight(table.Shape),
                 Shape = ToFloorShape(table.Shape),
                 ZIndex = 10,
+                SeatLayout = "[]",
                 IsVisible = true
             });
 
@@ -2058,8 +2099,10 @@ namespace Sassoir.Api.Data
                     Y = Clamp01(item.Y),
                     Width = Math.Clamp(item.Width, 0.04m, 1m),
                     Height = Math.Clamp(item.Height, 0.04m, 1m),
+                    Rotation = NormalizeRotation(item.Rotation),
                     Shape = item.Shape,
                     ZIndex = item.ZIndex,
+                    SeatLayout = SerializeSeatLayout(item.SeatLayout),
                     IsVisible = true
                 });
             }
@@ -2108,8 +2151,10 @@ namespace Sassoir.Api.Data
                     Y = Clamp01(item.Y),
                     Width = Math.Clamp(item.Width, 0.04m, 1m),
                     Height = Math.Clamp(item.Height, 0.04m, 1m),
+                    Rotation = NormalizeRotation(item.Rotation),
                     Shape = item.Shape,
                     ZIndex = item.ZIndex,
+                    SeatLayout = SerializeSeatLayout(item.SeatLayout),
                     IsVisible = true
                 });
             }
@@ -2356,8 +2401,10 @@ namespace Sassoir.Api.Data
                             item.Y,
                             item.Width,
                             item.Height,
+                            item.Rotation,
                             item.Shape,
-                            item.ZIndex);
+                            item.ZIndex,
+                            ReadSeatLayout(item.SeatLayout));
                     })
                     .ToArray() ?? []);
         }
@@ -2467,14 +2514,28 @@ namespace Sassoir.Api.Data
                 : displayName.Trim();
         }
 
-        private static AdminGuestImportRowDto BuildImportPreviewRow(AdminGuestImportRow row, int fallbackRowNumber, HashSet<string> existingKeys, Dictionary<string, int> seenKeys)
+        private static AdminGuestImportRowDto BuildImportPreviewRow(
+            AdminGuestImportRow row,
+            int fallbackRowNumber,
+            HashSet<string> existingKeys,
+            Dictionary<string, int> seenKeys,
+            Dictionary<string, EventTableEntity> tablesByCode,
+            Dictionary<string, EventTableEntity> tablesByName,
+            Dictionary<Guid, int> assignedCountsByTable,
+            HashSet<string> occupiedSeats,
+            HashSet<string> seenSeatKeys,
+            string seatingMode)
         {
             var firstName = row.FirstName?.Trim() ?? string.Empty;
             var lastName = row.LastName?.Trim() ?? string.Empty;
             var displayName = BuildDisplayName(firstName, lastName, row.DisplayName);
             var notes = row.Notes?.Trim() ?? string.Empty;
             var personCount = NormalizePersonCount(row.PersonCount);
+            var tableNumber = row.TableNumber?.Trim() ?? string.Empty;
+            var tableName = row.TableName?.Trim() ?? string.Empty;
+            var seatNumber = row.SeatNumber?.Trim();
             var errors = new List<string>();
+            EventTableEntity? table = null;
 
             if (string.IsNullOrWhiteSpace(displayName))
             {
@@ -2496,7 +2557,56 @@ namespace Sassoir.Api.Data
                 errors.Add("Possible duplicate guest.");
             }
 
-            return new AdminGuestImportRowDto(row.RowNumber ?? fallbackRowNumber, firstName, lastName, displayName, notes, personCount, isDuplicate, errors.ToArray());
+            if (!string.IsNullOrWhiteSpace(tableNumber) && !tablesByCode.TryGetValue(tableNumber, out table))
+            {
+                errors.Add($"Table {tableNumber} was not found.");
+            }
+
+            if (table is null && !string.IsNullOrWhiteSpace(tableName) && !tablesByName.TryGetValue(tableName, out table))
+            {
+                errors.Add($"Table {tableName} was not found.");
+            }
+
+            if (table is not null)
+            {
+                tableNumber = table.Code;
+                tableName = table.Name;
+                assignedCountsByTable.TryGetValue(table.Id, out var assignedCount);
+
+                if (seatingMode == "seat")
+                {
+                    var normalizedSeat = NormalizeSeatNumber(seatNumber, table.Capacity);
+                    if (normalizedSeat.Error is not null)
+                    {
+                        errors.Add(normalizedSeat.Error);
+                    }
+                    else
+                    {
+                        seatNumber = normalizedSeat.SeatNumber;
+                        var seatKey = $"{table.Id}:{seatNumber}";
+                        if (occupiedSeats.Contains(seatKey) || !seenSeatKeys.Add(seatKey))
+                        {
+                            errors.Add($"Seat {seatNumber} at table {table.Code} is already assigned.");
+                        }
+                    }
+                }
+                else
+                {
+                    seatNumber = null;
+                    if (assignedCount + personCount > table.Capacity)
+                    {
+                        errors.Add($"Table {table.Code} does not have enough open seats.");
+                    }
+                }
+
+                assignedCountsByTable[table.Id] = assignedCount + (seatingMode == "seat" ? 1 : personCount);
+            }
+            else if (!string.IsNullOrWhiteSpace(seatNumber))
+            {
+                errors.Add("Seat number requires an assigned table.");
+            }
+
+            return new AdminGuestImportRowDto(row.RowNumber ?? fallbackRowNumber, firstName, lastName, displayName, notes, personCount, table?.Id, tableNumber, tableName, seatNumber, isDuplicate, errors.ToArray());
         }
 
         private static string DuplicateKey(GuestEntity guest)
@@ -2686,6 +2796,61 @@ namespace Sassoir.Api.Data
         private static decimal Clamp01(decimal value)
         {
             return Math.Clamp(value, 0m, 1m);
+        }
+
+        private static decimal NormalizeRotation(decimal? value)
+        {
+            var rotation = value ?? 0m;
+            rotation %= 360m;
+            return rotation < 0m ? rotation + 360m : rotation;
+        }
+
+        private static FloorPlanSeatPositionDto[] ReadSeatLayout(string? seatLayout)
+        {
+            if (string.IsNullOrWhiteSpace(seatLayout)) return [];
+
+            try
+            {
+                var positions = JsonSerializer.Deserialize<FloorPlanSeatPositionDto[]>(seatLayout, SeatLayoutJsonOptions);
+                return NormalizeSeatLayout(positions);
+            }
+            catch (JsonException)
+            {
+                return [];
+            }
+        }
+
+        private static string SerializeSeatLayout(IEnumerable<FloorPlanSeatPositionDto>? seatLayout)
+        {
+            return JsonSerializer.Serialize(NormalizeSeatLayout(seatLayout), SeatLayoutJsonOptions);
+        }
+
+        private static FloorPlanSeatPositionDto[] NormalizeSeatLayout(IEnumerable<FloorPlanSeatPositionDto>? seatLayout)
+        {
+            if (seatLayout is null) return [];
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var positions = new List<FloorPlanSeatPositionDto>();
+
+            foreach (var position in seatLayout)
+            {
+                if (positions.Count >= 128) break;
+
+                var seatNumber = position.SeatNumber?.Trim() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(seatNumber) || !seen.Add(seatNumber)) continue;
+
+                positions.Add(new FloorPlanSeatPositionDto(
+                    seatNumber,
+                    ClampSeatLayoutPercent(position.X),
+                    ClampSeatLayoutPercent(position.Y)));
+            }
+
+            return positions.ToArray();
+        }
+
+        private static decimal ClampSeatLayoutPercent(decimal value)
+        {
+            return Math.Clamp(value, -20m, 120m);
         }
 
         private static (int Page, int PageSize) NormalizePaging(int? page, int? pageSize)
@@ -3179,8 +3344,12 @@ namespace Sassoir.Api.Models
         decimal Y,
         decimal Width,
         decimal Height,
+        decimal Rotation,
         string Shape,
-        int ZIndex);
+        int ZIndex,
+        FloorPlanSeatPositionDto[] SeatLayout);
+
+    public sealed record FloorPlanSeatPositionDto(string SeatNumber, decimal X, decimal Y);
 
     public sealed record LoginRequest(string Email, string Password);
 
@@ -3218,11 +3387,11 @@ namespace Sassoir.Api.Models
 
     public sealed record AdminGuestImportRequest(IReadOnlyList<AdminGuestImportRow> Guests);
 
-    public sealed record AdminGuestImportRow(int? RowNumber, string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount);
+    public sealed record AdminGuestImportRow(int? RowNumber, string? FirstName, string? LastName, string? DisplayName, string? Notes, int? PersonCount, string? TableNumber, string? TableName, string? SeatNumber);
 
     public sealed record AdminGuestImportPreviewDto(AdminGuestImportRowDto[] Rows, int ErrorCount, int DuplicateCount);
 
-    public sealed record AdminGuestImportRowDto(int RowNumber, string FirstName, string LastName, string DisplayName, string Notes, int PersonCount, bool IsDuplicate, string[] Errors);
+    public sealed record AdminGuestImportRowDto(int RowNumber, string FirstName, string LastName, string DisplayName, string Notes, int PersonCount, Guid? TableId, string TableNumber, string TableName, string? SeatNumber, bool IsDuplicate, string[] Errors);
 
     public sealed record AssignGuestTableRequest(Guid? TableId, string? SeatNumber);
 
@@ -3245,8 +3414,10 @@ namespace Sassoir.Api.Models
         decimal Y,
         decimal Width,
         decimal Height,
+        decimal? Rotation,
         string Shape,
-        int ZIndex);
+        int ZIndex,
+        FloorPlanSeatPositionDto[]? SeatLayout);
 
     public sealed record GuestSearchRequest(string Query);
 

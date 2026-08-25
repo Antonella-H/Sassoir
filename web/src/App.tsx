@@ -19,6 +19,8 @@ import {
   Pencil,
   Plus,
   QrCode,
+  RotateCcw,
+  RotateCw,
   Search,
   Send,
   Settings,
@@ -90,8 +92,16 @@ type FloorObject = {
   y: number;
   width: number;
   height: number;
+  rotation: number;
   shape: "round" | "square" | "rectangle" | "tear" | "rect";
   zIndex?: number;
+  seatLayout?: SeatLayoutPosition[];
+};
+
+type SeatLayoutPosition = {
+  seatNumber: string;
+  x: number;
+  y: number;
 };
 
 type AdminGuest = {
@@ -448,6 +458,10 @@ type ImportPreviewRow = {
   displayName: string;
   notes: string;
   personCount: number;
+  tableId?: string | null;
+  tableNumber: string;
+  tableName: string;
+  seatNumber?: string | null;
   isDuplicate: boolean;
   errors: string[];
 };
@@ -540,15 +554,15 @@ const fallbackGuests: Guest[] = [
 ];
 
 const fallbackFloorObjects: FloorObject[] = [
-  { id: "stage", type: "stage", label: "Stage", x: 0.35, y: 0.06, width: 0.38, height: 0.11, shape: "rect" },
-  { id: "table-8", type: "table", label: "Table 8", x: 0.13, y: 0.25, width: 0.15, height: 0.15, shape: "round" },
-  { id: "table-10", type: "table", label: "Table 10", x: 0.13, y: 0.53, width: 0.16, height: 0.16, shape: "round" },
-  { id: "dance", type: "dance", label: "Dance Floor", x: 0.42, y: 0.4, width: 0.28, height: 0.25, shape: "rect" },
-  { id: "bar", type: "bar", label: "Bar", x: 0.82, y: 0.27, width: 0.13, height: 0.25, shape: "rect" },
-  { id: "table-12", type: "table", label: "Table 12", x: 0.76, y: 0.56, width: 0.15, height: 0.15, shape: "round" },
-  { id: "restroom", type: "restroom", label: "Toilets", x: 0.83, y: 0.69, width: 0.13, height: 0.12, shape: "rect" },
-  { id: "table-14", type: "table", label: "Table 14", x: 0.75, y: 0.82, width: 0.16, height: 0.16, shape: "round" },
-  { id: "entrance", type: "entrance", label: "Entrance", x: 0.1, y: 0.83, width: 0.15, height: 0.09, shape: "rect" },
+  { id: "stage", type: "stage", label: "Stage", x: 0.35, y: 0.06, width: 0.38, height: 0.11, rotation: 0, shape: "rect" },
+  { id: "table-8", type: "table", label: "Table 8", x: 0.13, y: 0.25, width: 0.15, height: 0.15, rotation: 0, shape: "round" },
+  { id: "table-10", type: "table", label: "Table 10", x: 0.13, y: 0.53, width: 0.16, height: 0.16, rotation: 0, shape: "round" },
+  { id: "dance", type: "dance", label: "Dance Floor", x: 0.42, y: 0.4, width: 0.28, height: 0.25, rotation: 0, shape: "rect" },
+  { id: "bar", type: "bar", label: "Bar", x: 0.82, y: 0.27, width: 0.13, height: 0.25, rotation: 0, shape: "rect" },
+  { id: "table-12", type: "table", label: "Table 12", x: 0.76, y: 0.56, width: 0.15, height: 0.15, rotation: 0, shape: "round" },
+  { id: "restroom", type: "restroom", label: "Toilets", x: 0.83, y: 0.69, width: 0.13, height: 0.12, rotation: 0, shape: "rect" },
+  { id: "table-14", type: "table", label: "Table 14", x: 0.75, y: 0.82, width: 0.16, height: 0.16, rotation: 0, shape: "round" },
+  { id: "entrance", type: "entrance", label: "Entrance", x: 0.1, y: 0.83, width: 0.15, height: 0.09, rotation: 0, shape: "rect" },
 ];
 
 const eventTypeOptions = ["Wedding", "Corporate", "Gala", "Conference", "Birthday", "Private Dinner", "Other"];
@@ -725,8 +739,10 @@ function toFloorObjects(objects: any[] | undefined): FloorObject[] {
     y: Number(item.y),
     width: Number(item.width),
     height: Number(item.height),
+    rotation: normalizeRotation(Number(item.rotation ?? 0)),
     shape: normalizeFloorShape(item.shape),
     zIndex: Number(item.zIndex ?? 0),
+    seatLayout: normalizeSeatLayout(item.seatLayout),
   }));
 }
 
@@ -750,6 +766,8 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
         tableCode: table.number,
         tableName: table.name,
         shape: table.shape,
+        rotation: existing.rotation ?? 0,
+        seatLayout: existing.seatLayout ?? [],
         width: shapeChanged ? tableShapeDefaultWidth(table.shape) : existing.width,
         height: shapeChanged ? tableShapeDefaultHeight(table.shape) : existing.height,
       };
@@ -767,8 +785,10 @@ function withTableFloorObjects(objects: FloorObject[], tables: AdminTable[]) {
       y: 0.24 + Math.floor(index / 4) * 0.18,
       width: tableShapeDefaultWidth(table.shape),
       height: tableShapeDefaultHeight(table.shape),
+      rotation: 0,
       shape: table.shape,
       zIndex: 5 + index,
+      seatLayout: [],
     });
   });
 
@@ -793,14 +813,46 @@ function floorObjectsForSave(objects: FloorObject[]) {
     y: clampUnit(object.y),
     width: clampUnit(object.width),
     height: clampUnit(object.height),
+    rotation: normalizeRotation(object.rotation ?? 0),
     shape: object.shape,
     zIndex: object.zIndex ?? index,
+    seatLayout: normalizeSeatLayout(object.seatLayout),
   }));
 }
 
 function clampUnit(value: number) {
   if (Number.isNaN(value)) return 0;
   return Math.max(0, Math.min(1, value));
+}
+
+function normalizeRotation(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  const rotation = Math.round(value) % 360;
+  return rotation < 0 ? rotation + 360 : rotation;
+}
+
+function normalizeSeatLayout(value: unknown): SeatLayoutPosition[] {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  return value.reduce<SeatLayoutPosition[]>((positions, item) => {
+    if (!item || typeof item !== "object" || positions.length >= 128) return positions;
+    const source = item as Partial<SeatLayoutPosition>;
+    const seatNumber = String(source.seatNumber ?? "").trim();
+    if (!seatNumber || seen.has(seatNumber)) return positions;
+    seen.add(seatNumber);
+    positions.push({
+      seatNumber,
+      x: clampSeatLayoutPercent(Number(source.x)),
+      y: clampSeatLayoutPercent(Number(source.y)),
+    });
+    return positions;
+  }, []);
+}
+
+function clampSeatLayoutPercent(value: number) {
+  if (!Number.isFinite(value)) return 50;
+  return Math.max(-20, Math.min(120, value));
 }
 
 function safeGetStorage(key: string) {
@@ -1644,7 +1696,7 @@ function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject
   if (!highlightedObject) return <MinimalFloorPlan tableCode={tableCode} />;
 
   const routePath = buildGuestRoutePath(
-    entranceObject ?? { id: "guest-route-entrance", type: "entrance", label: "Entrance", x: 0.12, y: 0.84, width: 0.16, height: 0.08, shape: "rect" },
+    entranceObject ?? { id: "guest-route-entrance", type: "entrance", label: "Entrance", x: 0.12, y: 0.84, width: 0.16, height: 0.08, rotation: 0, shape: "rect" },
     highlightedObject,
     objects,
   );
@@ -1665,6 +1717,7 @@ function GuestFloorPlan({ floorObjects, tableCode }: { floorObjects: FloorObject
               top: `${object.y * 100}%`,
               width: `${object.width * 100}%`,
               height: `${object.height * 100}%`,
+              transform: `rotate(${normalizeRotation(object.rotation ?? 0)}deg)`,
               zIndex: object.zIndex ?? 1,
             }}
             aria-label={`${object.label}${highlighted ? ", your table" : ""}`}
@@ -1906,7 +1959,7 @@ function FloorPlan({ floorObjects, highlightedTableId, zoom }: { floorObjects: F
             <div
               className={`floor-object ${object.type} ${object.shape} ${highlighted ? "highlighted" : "dimmed"}`}
               key={object.id}
-              style={{ left: `${object.x * 100}%`, top: `${object.y * 100}%`, width: `${object.width * 100}%`, height: `${object.height * 100}%` }}
+              style={{ left: `${object.x * 100}%`, top: `${object.y * 100}%`, width: `${object.width * 100}%`, height: `${object.height * 100}%`, transform: `rotate(${normalizeRotation(object.rotation ?? 0)}deg)` }}
               aria-label={`${object.label}${highlighted ? ", your assigned table" : ""}`}
             >
               <span>{object.label}</span>
@@ -2780,7 +2833,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
   function downloadGuestTemplate() {
     downloadTextFile(
       "sassoir-guest-import-template.csv",
-      "First Name,Last Name,Display Name,Person Count,Notes\nAntonella,Hitti,,2,Vegetarian meal\nKarim,Saab,Karim Saab,1,Needs aisle access\n",
+      "First Name,Last Name,Display Name,Person Count,Table Number,Table Name,Seat Number,Notes\nAntonella,Hitti,,1,12,The Olive Garden,6,Vegetarian meal\nKarim,Saab,Karim Saab,1,8,Cedar Grove,3,Needs aisle access\n",
       "text/csv",
     );
   }
@@ -3078,7 +3131,7 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
               </div>
               <button className="icon-button" type="button" onClick={() => setShowImportDialog(false)} aria-label="Close import dialog"><X aria-hidden="true" /></button>
             </div>
-            <p className="admin-muted">Use the CSV template for first name, last name, optional display name, and notes. If display name is blank, Sassoir fills it from first and last name.</p>
+            <p className="admin-muted">Use the CSV template for guest names, table number or table name, optional seat number, and notes. If display name is blank, Sassoir fills it from first and last name.</p>
             <div className="template-actions">
               <button className="secondary-button compact-button" type="button" onClick={downloadGuestTemplate}><Download aria-hidden="true" />Download template</button>
               <label className="primary-button compact-button import-button">
@@ -3231,6 +3284,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                     <th>Row</th>
                     <th>Guest</th>
                     <th>People</th>
+                    <th>Table</th>
+                    {seatBasedEvent ? <th>Seat</th> : null}
                     <th>Notes</th>
                     <th>Review</th>
                   </tr>
@@ -3241,6 +3296,8 @@ function GuestsPage({ event, token }: { event: AdminEvent; token: string }) {
                       <td data-label="Row">{row.rowNumber}</td>
                       <td data-label="Guest"><strong>{row.displayName || "Missing name"}</strong><span>{[row.firstName, row.lastName].filter(Boolean).join(" ") || "No legal name set"}</span></td>
                       <td data-label="People">{row.personCount}</td>
+                      <td data-label="Table">{row.tableNumber || "-"}<span>{row.tableName || ""}</span></td>
+                      {seatBasedEvent ? <td data-label="Seat">{row.seatNumber ? `Seat ${row.seatNumber}` : "-"}</td> : null}
                       <td data-label="Notes">{row.notes || "-"}</td>
                       <td data-label="Review">{row.errors.length ? <span className="guest-flag error"><FileWarning aria-hidden="true" />{row.errors.join(" ")}</span> : <span className="guest-flag ok"><Check aria-hidden="true" />Ready</span>}</td>
                     </tr>
@@ -3387,6 +3444,47 @@ function seatNumbersForTable(table: AdminTable) {
   return Array.from({ length: Math.max(1, table.maximumCapacity) }, (_, index) => String(index + 1));
 }
 
+function defaultSeatPosition(index: number, count: number): SeatLayoutPosition {
+  const angle = (index / Math.max(1, count)) * Math.PI * 2 - Math.PI / 2;
+  const radiusX = 58;
+  const radiusY = 58;
+
+  return {
+    seatNumber: String(index + 1),
+    x: 50 + Math.cos(angle) * radiusX,
+    y: 50 + Math.sin(angle) * radiusY,
+  };
+}
+
+function seatPositionForObject(object: FloorObject, seatNumber: string, index: number, count: number) {
+  return object.seatLayout?.find((position) => position.seatNumber === seatNumber) ?? {
+    ...defaultSeatPosition(index, count),
+    seatNumber,
+  };
+}
+
+function tableSeatMarkerStyle(position: SeatLayoutPosition): React.CSSProperties {
+  const angle = Math.atan2(position.y - 50, position.x - 50) * 180 / Math.PI + 90;
+  return {
+    left: `${position.x}%`,
+    top: `${position.y}%`,
+    transform: `translate(-50%, -50%) rotate(${angle}deg)`,
+  };
+}
+
+function mergeSeatLayout(layout: SeatLayoutPosition[] | undefined, seatNumber: string, x: number, y: number) {
+  const nextPosition = {
+    seatNumber,
+    x: clampSeatLayoutPercent(x),
+    y: clampSeatLayoutPercent(y),
+  };
+  const current = layout ?? [];
+  const existingIndex = current.findIndex((position) => position.seatNumber === seatNumber);
+  if (existingIndex < 0) return [...current, nextPosition];
+
+  return current.map((position, index) => index === existingIndex ? nextPosition : position);
+}
+
 function parseGuestCsv(text: string) {
   const rows = parseCsv(text).filter((row) => row.some((cell) => cell.trim().length > 0));
   if (rows.length === 0) return [];
@@ -3406,6 +3504,9 @@ function parseGuestCsv(text: string) {
       lastName: value("lastname", "last", "last_name", "surname"),
       displayName: value("displayname", "display", "name", "fullname"),
       personCount: normalizePersonCount(Number(value("personcount", "people", "persons", "partysize", "party", "numberofpersons", "numberofperson"))),
+      tableNumber: value("tablenumber", "table", "tablecode", "assignedtable", "assignedtablenumber"),
+      tableName: value("tablename", "assignedtablename"),
+      seatNumber: value("seatnumber", "seat", "assignedseat", "assignedseatnumber"),
       notes: value("notes", "note", "comment", "comments"),
     };
   });
@@ -3515,19 +3616,21 @@ function drawFloorObject(context: CanvasRenderingContext2D, object: FloorObject,
     : object.label;
 
   context.save();
+  context.translate(x + width / 2, y + height / 2);
+  context.rotate(normalizeRotation(object.rotation ?? 0) * Math.PI / 180);
   context.fillStyle = object.type === "table" ? "#17171a" : object.type === "dance" ? "#f7f7f7" : "#f5f3ee";
   context.strokeStyle = "#17171a";
   context.lineWidth = 3;
 
   context.beginPath();
   if (object.shape === "round") {
-    context.ellipse(x + width / 2, y + height / 2, width / 2, height / 2, 0, 0, Math.PI * 2);
+    context.ellipse(0, 0, width / 2, height / 2, 0, 0, Math.PI * 2);
   } else if (object.shape === "tear") {
-    context.moveTo(x + width * 0.5, y);
-    context.bezierCurveTo(x + width, y + height * 0.08, x + width * 0.95, y + height * 0.72, x + width * 0.5, y + height);
-    context.bezierCurveTo(x + width * 0.05, y + height * 0.72, x, y + height * 0.08, x + width * 0.5, y);
+    context.moveTo(0, -height / 2);
+    context.bezierCurveTo(width / 2, -height * 0.42, width * 0.45, height * 0.22, 0, height / 2);
+    context.bezierCurveTo(-width * 0.45, height * 0.22, -width / 2, -height * 0.42, 0, -height / 2);
   } else {
-    context.roundRect(x, y, width, height, object.shape === "rectangle" || object.shape === "rect" ? 10 : 16);
+    context.roundRect(-width / 2, -height / 2, width, height, object.shape === "rectangle" || object.shape === "rect" ? 10 : 16);
   }
   context.fill();
   context.stroke();
@@ -3536,7 +3639,7 @@ function drawFloorObject(context: CanvasRenderingContext2D, object: FloorObject,
   context.font = "700 22px Inter, Arial, sans-serif";
   context.textAlign = "center";
   context.textBaseline = "middle";
-  context.fillText(label, x + width / 2, y + height / 2, Math.max(width - 16, 40));
+  context.fillText(label, 0, 0, Math.max(width - 16, 40));
   context.restore();
 }
 
@@ -3556,6 +3659,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   const [warning, setWarning] = useState("");
   const [tableDraft, setTableDraft] = useState<AdminTableDraft>(emptyTableDraft());
   const [tableQuery, setTableQuery] = useState("");
+  const floorDesignerCanvasRef = useRef<HTMLDivElement | null>(null);
   const [tablePage, setTablePage] = useState(1);
   const [totalTableCount, setTotalTableCount] = useState(0);
   const debouncedTableQuery = useDebouncedValue(tableQuery, 300);
@@ -3769,6 +3873,48 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
     }));
   }
 
+  function moveSeatMarker(object: FloorObject, seatNumber: string, clientX: number, clientY: number) {
+    const canvas = floorDesignerCanvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const objectCenterX = rect.left + (object.x + object.width / 2) * rect.width;
+    const objectCenterY = rect.top + (object.y + object.height / 2) * rect.height;
+    const deltaX = clientX - objectCenterX;
+    const deltaY = clientY - objectCenterY;
+    const inverseRotation = -normalizeRotation(object.rotation ?? 0) * Math.PI / 180;
+    const localDeltaX = deltaX * Math.cos(inverseRotation) - deltaY * Math.sin(inverseRotation);
+    const localDeltaY = deltaX * Math.sin(inverseRotation) + deltaY * Math.cos(inverseRotation);
+    const objectWidth = Math.max(1, object.width * rect.width);
+    const objectHeight = Math.max(1, object.height * rect.height);
+    const x = 50 + (localDeltaX / objectWidth) * 100;
+    const y = 50 + (localDeltaY / objectHeight) * 100;
+
+    setFloorObjects((current) => current.map((item) => item.id === object.id
+      ? { ...item, seatLayout: mergeSeatLayout(item.seatLayout, seatNumber, x, y) }
+      : item));
+  }
+
+  function beginSeatMarkerDrag(pointerEvent: React.PointerEvent<HTMLButtonElement>, object: FloorObject, seatNumber: string) {
+    pointerEvent.preventDefault();
+    pointerEvent.stopPropagation();
+    setSelectedObjectId(object.id);
+    setSelectedSeatNumber(seatNumber);
+    moveSeatMarker(object, seatNumber, pointerEvent.clientX, pointerEvent.clientY);
+
+    const handlePointerMove = (event: PointerEvent) => {
+      event.preventDefault();
+      moveSeatMarker(object, seatNumber, event.clientX, event.clientY);
+    };
+    const handlePointerUp = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+  }
+
   function addSection(template: Pick<FloorObject, "type" | "label" | "width" | "height" | "shape">) {
     setFloorObjects((current) => [
       ...current,
@@ -3780,6 +3926,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
         y: 0.32,
         width: template.width,
         height: template.height,
+        rotation: 0,
         shape: template.shape,
         zIndex: current.length + 10,
       },
@@ -3797,6 +3944,31 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
         height: Math.max(0.04, Math.min(1, object.height + delta)),
       };
     }));
+  }
+
+  function rotateSelectedObject(delta: number) {
+    if (!selectedObjectId) return;
+
+    setFloorObjects((current) => current.map((object) => {
+      if (object.id !== selectedObjectId) return object;
+      return { ...object, rotation: normalizeRotation((object.rotation ?? 0) + delta) };
+    }));
+  }
+
+  function setSelectedObjectRotation(rotation: number) {
+    if (!selectedObjectId) return;
+
+    setFloorObjects((current) => current.map((object) => object.id === selectedObjectId
+      ? { ...object, rotation: normalizeRotation(rotation) }
+      : object));
+  }
+
+  function resetSelectedSeatLayout() {
+    if (!selectedObjectId) return;
+
+    setFloorObjects((current) => current.map((object) => object.id === selectedObjectId
+      ? { ...object, seatLayout: [] }
+      : object));
   }
 
   const seatBasedEvent = isSeatBasedEvent(event);
@@ -4134,39 +4306,85 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
               ))}
               <button className="secondary-button compact-button" type="button" onClick={() => resizeSelectedObject(-0.02)} disabled={!selectedObject}><Minus aria-hidden="true" />Smaller</button>
               <button className="secondary-button compact-button" type="button" onClick={() => resizeSelectedObject(0.02)} disabled={!selectedObject}><Plus aria-hidden="true" />Bigger</button>
+              <button className="icon-button" type="button" onClick={() => rotateSelectedObject(-45)} disabled={!selectedObject} aria-label="Rotate selected object left"><RotateCcw aria-hidden="true" /></button>
+              <button className="icon-button" type="button" onClick={() => rotateSelectedObject(45)} disabled={!selectedObject} aria-label="Rotate selected object right"><RotateCw aria-hidden="true" /></button>
+              {selectedObject ? (
+                <label className="rotation-control">
+                  <span>Angle</span>
+                  <input type="number" min="0" max="359" value={normalizeRotation(selectedObject.rotation ?? 0)} onChange={(formEvent) => setSelectedObjectRotation(Number(formEvent.target.value))} />
+                </label>
+              ) : null}
+              {seatBasedEvent && selectedTable ? <button className="secondary-button compact-button" type="button" onClick={resetSelectedSeatLayout}>Reset seats</button> : null}
               {selectedObject ? <span className="designer-selection">Selected: {selectedObject.label}</span> : null}
             </div>
 
-            <div className="floor-designer-canvas" onDragOver={(dragEvent) => dragEvent.preventDefault()} onDrop={moveObject} aria-label="Drag tables and venue sections to arrange the floor plan">
-              {floorObjects.map((object) => (
-                <div
-                  className={`floor-designer-object ${object.type} ${object.shape}`}
-                  draggable
-                  key={object.id}
-                  onClick={() => {
-                    setSelectedObjectId(object.id);
-                    setSelectedSeatNumber("");
-                  }}
-                  onDragStart={(dragEvent) => dragEvent.dataTransfer.setData("floor-object-id", object.id)}
-                  onDragOver={object.type === "table" ? (dragEvent) => dragEvent.preventDefault() : undefined}
-                  onDrop={object.type === "table" ? (dropEvent) => {
-                    const guestId = dropEvent.dataTransfer.getData("guest-id");
-                    if (!guestId) return;
-                    dropEvent.preventDefault();
-                    dropEvent.stopPropagation();
-                    void assignGuestToTable(guestId, object.linkedTableId, object.linkedTableId === selectedTable?.id ? selectedSeatNumber : null);
-                  } : undefined}
-                  style={{
-                    left: `${object.x * 100}%`,
-                    top: `${object.y * 100}%`,
-                    width: `${object.width * 100}%`,
-                    height: `${object.height * 100}%`,
-                    zIndex: object.zIndex ?? 1,
-                  }}
-                >
-                  <span>{object.type === "table" ? `Table ${object.tableCode ?? object.label}${object.tableName ? ` - ${object.tableName}` : ""}` : object.label}</span>
-                </div>
-              ))}
+            <div className="floor-designer-canvas" ref={floorDesignerCanvasRef} onDragOver={(dragEvent) => dragEvent.preventDefault()} onDrop={moveObject} aria-label="Drag tables and venue sections to arrange the floor plan">
+              {floorObjects.map((object) => {
+                const objectTable = object.type === "table" && object.linkedTableId
+                  ? tables.find((table) => table.id === object.linkedTableId)
+                  : undefined;
+                const objectSeatGuests = objectTable
+                  ? new globalThis.Map(guests
+                    .filter((guest) => guest.tableId === objectTable.id && guest.seatNumber && (guest.status === "Active" || guest.status === "CheckedIn"))
+                    .map((guest) => [guest.seatNumber ?? "", guest] as const))
+                  : new globalThis.Map<string, AdminGuest>();
+
+                return (
+                  <div
+                    className={`floor-designer-object ${object.type} ${object.shape}`}
+                    draggable
+                    key={object.id}
+                    onClick={() => {
+                      setSelectedObjectId(object.id);
+                      setSelectedSeatNumber("");
+                    }}
+                    onDragStart={(dragEvent) => dragEvent.dataTransfer.setData("floor-object-id", object.id)}
+                    onDragOver={object.type === "table" ? (dragEvent) => dragEvent.preventDefault() : undefined}
+                    onDrop={object.type === "table" ? (dropEvent) => {
+                      const guestId = dropEvent.dataTransfer.getData("guest-id");
+                      if (!guestId) return;
+                      dropEvent.preventDefault();
+                      dropEvent.stopPropagation();
+                      void assignGuestToTable(guestId, object.linkedTableId, object.linkedTableId === selectedTable?.id ? selectedSeatNumber : null);
+                    } : undefined}
+                    style={{
+                      left: `${object.x * 100}%`,
+                      top: `${object.y * 100}%`,
+                      width: `${object.width * 100}%`,
+                      height: `${object.height * 100}%`,
+                      transform: `rotate(${normalizeRotation(object.rotation ?? 0)}deg)`,
+                      zIndex: object.zIndex ?? 1,
+                    }}
+                  >
+                    {seatBasedEvent && objectTable ? (
+                      <div className="table-seat-marker-layer">
+                        {seatNumbersForTable(objectTable).map((seatNumber, index, seats) => {
+                          const occupant = objectSeatGuests.get(seatNumber);
+                          const seatPosition = seatPositionForObject(object, seatNumber, index, seats.length);
+                          return (
+                            <button
+                              className={`table-seat-marker ${occupant ? "filled" : "empty"} ${selectedTable?.id === objectTable.id && selectedSeatNumber === seatNumber ? "selected" : ""}`}
+                              key={seatNumber}
+                              type="button"
+                              draggable={false}
+                              onPointerDown={(pointerEvent) => beginSeatMarkerDrag(pointerEvent, object, seatNumber)}
+                              onDragStart={(dragEvent) => dragEvent.preventDefault()}
+                              onClick={(clickEvent) => {
+                                clickEvent.stopPropagation();
+                                setSelectedObjectId(object.id);
+                                setSelectedSeatNumber(seatNumber);
+                              }}
+                              style={tableSeatMarkerStyle(seatPosition)}
+                              title={occupant ? `Seat ${seatNumber}: ${occupant.displayName}` : `Seat ${seatNumber}: empty`}
+                            />
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    <span className="floor-object-label">{object.type === "table" ? `Table ${object.tableCode ?? object.label}${object.tableName ? ` - ${object.tableName}` : ""}` : object.label}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
 

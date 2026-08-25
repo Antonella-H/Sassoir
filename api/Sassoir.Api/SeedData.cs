@@ -32,15 +32,15 @@ public static class SeedData
                 "Garden Ballroom",
                 1.14m,
                 [
-                    new("stage", "stage", "Stage", null, null, null, 0.35m, 0.06m, 0.38m, 0.11m, "rect", 1),
-                    new("table-8", "table", "Table 8", null, "8", "Cedar Grove", 0.13m, 0.25m, 0.15m, 0.15m, "round", 2),
-                    new("table-10", "table", "Table 10", null, "10", "Jasmine Court", 0.13m, 0.53m, 0.16m, 0.16m, "round", 2),
-                    new("dance", "dance", "Dance Floor", null, null, null, 0.42m, 0.40m, 0.28m, 0.25m, "rect", 1),
-                    new("bar", "bar", "Bar", null, null, null, 0.82m, 0.27m, 0.13m, 0.25m, "rect", 1),
-                    new("table-12", "table", "Table 12", null, "12", "The Olive Garden", 0.76m, 0.56m, 0.15m, 0.15m, "round", 2),
-                    new("restroom", "restroom", "Toilets", null, null, null, 0.83m, 0.69m, 0.13m, 0.12m, "rect", 1),
-                    new("table-14", "table", "Table 14", null, "14", "Terrace", 0.75m, 0.82m, 0.16m, 0.16m, "round", 2),
-                    new("entrance", "entrance", "Entrance", null, null, null, 0.10m, 0.83m, 0.15m, 0.09m, "rect", 1)
+                    new("stage", "stage", "Stage", null, null, null, 0.35m, 0.06m, 0.38m, 0.11m, 0m, "rect", 1, []),
+                    new("table-8", "table", "Table 8", null, "8", "Cedar Grove", 0.13m, 0.25m, 0.15m, 0.15m, 0m, "round", 2, []),
+                    new("table-10", "table", "Table 10", null, "10", "Jasmine Court", 0.13m, 0.53m, 0.16m, 0.16m, 0m, "round", 2, []),
+                    new("dance", "dance", "Dance Floor", null, null, null, 0.42m, 0.40m, 0.28m, 0.25m, 0m, "rect", 1, []),
+                    new("bar", "bar", "Bar", null, null, null, 0.82m, 0.27m, 0.13m, 0.25m, 0m, "rect", 1, []),
+                    new("table-12", "table", "Table 12", null, "12", "The Olive Garden", 0.76m, 0.56m, 0.15m, 0.15m, 0m, "round", 2, []),
+                    new("restroom", "restroom", "Toilets", null, null, null, 0.83m, 0.69m, 0.13m, 0.12m, 0m, "rect", 1, []),
+                    new("table-14", "table", "Table 14", null, "14", "Terrace", 0.75m, 0.82m, 0.16m, 0.16m, 0m, "round", 2, []),
+                    new("entrance", "entrance", "Entrance", null, null, null, 0.10m, 0.83m, 0.15m, 0.09m, 0m, "rect", 1, [])
                 ]),
             [
                 new(Guid.Parse("29a84b1f-0ae4-4f31-9df6-0918f26f3d78"), "guest-sarah-lichaa", "Sarah Lichaa", "Lichaa Family", "12", "The Olive Garden", "4", "Near the dance floor, with a clear view of the stage.", GuestStatus.Active, ["sarah", "sara lichaa", "Ø³Ø§Ø±Ø© Ù„Ø­Ø§Ø¡"], ["Roula L.", "Maya K.", "Karim H."]),
