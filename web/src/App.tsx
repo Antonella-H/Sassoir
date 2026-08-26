@@ -29,6 +29,8 @@ import {
   Trash2,
   Upload,
   Users,
+  ZoomIn,
+  ZoomOut,
   X,
 } from "lucide-react";
 import "./styles.css";
@@ -1709,6 +1711,7 @@ function GuestFloorPlan({ floorObjects, tableCode, seatNumber, showSeats }: { fl
   const objects = floorObjects.length > 0 ? floorObjects : fallbackFloorObjects;
   const highlightedObject = objects.find((object) => object.type === "table" && (object.tableCode === tableCode || object.id === `table-${tableCode}`));
   const entranceObject = objects.find((object) => object.type === "entrance");
+  const danceObject = objects.find((object) => object.type === "dance");
 
   if (!highlightedObject) return <MinimalFloorPlan tableCode={tableCode} />;
 
@@ -1745,7 +1748,7 @@ function GuestFloorPlan({ floorObjects, tableCode, seatNumber, showSeats }: { fl
             {objectSeatNumbers.length > 0 ? (
               <div className="guest-table-seat-marker-layer" aria-hidden="true">
                 {objectSeatNumbers.map((currentSeatNumber, index, seats) => {
-                  const position = seatPositionForObject(object, currentSeatNumber, index, seats.length);
+                  const position = seatPositionForObject(object, currentSeatNumber, index, seats.length, danceObject);
                   const assigned = highlighted && seatNumber === currentSeatNumber;
                   return (
                     <span
@@ -3528,41 +3531,79 @@ function seatNumbersForFloorObject(object: FloorObject, minimumSeatNumber?: stri
   return Array.from({ length: normalizePersonCount(seatCount) }, (_, index) => String(index + 1));
 }
 
-function defaultSeatPosition(object: FloorObject, index: number, count: number): SeatLayoutPosition {
+function danceFloorLocalVector(object: FloorObject, danceObject?: FloorObject) {
+  const objectCenter = centerOfObject(object);
+  const danceCenter = danceObject ? centerOfObject(danceObject) : { x: objectCenter.x, y: 120 };
+  const deltaX = danceCenter.x - objectCenter.x;
+  const deltaY = danceCenter.y - objectCenter.y;
+  const inverseRotation = -normalizeRotation(object.rotation ?? 0) * Math.PI / 180;
+
+  return {
+    x: deltaX * Math.cos(inverseRotation) - deltaY * Math.sin(inverseRotation),
+    y: deltaX * Math.sin(inverseRotation) + deltaY * Math.cos(inverseRotation),
+  };
+}
+
+function danceFloorSide(object: FloorObject, danceObject?: FloorObject) {
+  const localVector = danceFloorLocalVector(object, danceObject);
+  if (object.width >= object.height) return localVector.y >= 0 ? "bottom" : "top";
+  return localVector.x >= 0 ? "right" : "left";
+}
+
+function lineSeatOffset(index: number, count: number) {
+  return count <= 1 ? 50 : (index / (count - 1)) * 100;
+}
+
+function defaultSeatPosition(object: FloorObject, index: number, count: number, danceObject?: FloorObject): SeatLayoutPosition {
   if (object.shape === "rectangle" || object.shape === "rect") {
     const seatsPerSide = Math.ceil(count / 2);
     const onFirstSide = index < seatsPerSide;
     const sideIndex = onFirstSide ? index : index - seatsPerSide;
     const sideCount = onFirstSide ? seatsPerSide : count - seatsPerSide;
-    const offset = sideCount <= 1 ? 50 : 14 + (sideIndex / (sideCount - 1)) * 72;
+    const localDanceVector = danceFloorLocalVector(object, danceObject);
+    const reverseOffset = object.width >= object.height ? localDanceVector.x > 0 : localDanceVector.y > 0;
+    const baseOffset = lineSeatOffset(sideIndex, sideCount);
+    const offset = reverseOffset ? 100 - baseOffset : baseOffset;
+    const firstSide = danceFloorSide(object, danceObject);
 
     if (object.width >= object.height) {
       return {
         seatNumber: String(index + 1),
         x: offset,
-        y: onFirstSide ? -8 : 108,
+        y: (onFirstSide ? firstSide : firstSide === "bottom" ? "top" : "bottom") === "bottom" ? 108 : -8,
       };
     }
 
     return {
       seatNumber: String(index + 1),
-      x: onFirstSide ? -8 : 108,
+      x: (onFirstSide ? firstSide : firstSide === "right" ? "left" : "right") === "right" ? 108 : -8,
       y: offset,
     };
   }
 
   if (object.shape === "square") {
+    const firstSide = danceFloorSide(object, danceObject);
+    const sideOrder = firstSide === "bottom"
+      ? ["bottom", "left", "top", "right"]
+      : firstSide === "left"
+        ? ["left", "top", "right", "bottom"]
+        : firstSide === "right"
+          ? ["right", "bottom", "left", "top"]
+          : ["top", "right", "bottom", "left"];
     const side = Math.floor((index / Math.max(1, count)) * 4);
     const sideSlotCount = Math.ceil(count / 4);
     const sideIndex = index % sideSlotCount;
-    const offset = sideSlotCount <= 1 ? 50 : 14 + (sideIndex / (sideSlotCount - 1)) * 72;
-    if (side === 0) return { seatNumber: String(index + 1), x: offset, y: -8 };
-    if (side === 1) return { seatNumber: String(index + 1), x: 108, y: offset };
-    if (side === 2) return { seatNumber: String(index + 1), x: 100 - offset, y: 108 };
-    return { seatNumber: String(index + 1), x: -8, y: 100 - offset };
+    const offset = lineSeatOffset(sideIndex, sideSlotCount);
+    const selectedSide = sideOrder[side];
+    if (selectedSide === "top") return { seatNumber: String(index + 1), x: offset, y: -8 };
+    if (selectedSide === "right") return { seatNumber: String(index + 1), x: 108, y: offset };
+    if (selectedSide === "bottom") return { seatNumber: String(index + 1), x: offset, y: 108 };
+    return { seatNumber: String(index + 1), x: -8, y: offset };
   }
 
-  const angle = (index / Math.max(1, count)) * Math.PI * 2 - Math.PI / 2;
+  const localVector = danceFloorLocalVector(object, danceObject);
+  const startAngle = Math.atan2(localVector.y, localVector.x);
+  const angle = startAngle + (index / Math.max(1, count)) * Math.PI * 2;
   const radiusX = 58;
   const radiusY = 58;
 
@@ -3573,9 +3614,9 @@ function defaultSeatPosition(object: FloorObject, index: number, count: number):
   };
 }
 
-function seatPositionForObject(object: FloorObject, seatNumber: string, index: number, count: number) {
+function seatPositionForObject(object: FloorObject, seatNumber: string, index: number, count: number, danceObject?: FloorObject) {
   return object.seatLayout?.find((position) => position.seatNumber === seatNumber) ?? {
-    ...defaultSeatPosition(object, index, count),
+    ...defaultSeatPosition(object, index, count, danceObject),
     seatNumber,
   };
 }
@@ -3810,6 +3851,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
   const [tableDraft, setTableDraft] = useState<AdminTableDraft>(emptyTableDraft());
   const [tableQuery, setTableQuery] = useState("");
   const floorDesignerCanvasRef = useRef<HTMLDivElement | null>(null);
+  const [designerZoom, setDesignerZoom] = useState(1);
   const [tablePage, setTablePage] = useState(1);
   const [totalTableCount, setTotalTableCount] = useState(0);
   const debouncedTableQuery = useDebouncedValue(tableQuery, 300);
@@ -4141,7 +4183,12 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
       : object));
   }
 
+  function updateDesignerZoom(delta: number) {
+    setDesignerZoom((current) => Math.max(1, Math.min(2.5, Math.round((current + delta) * 10) / 10)));
+  }
+
   const seatBasedEvent = isSeatBasedEvent(event);
+  const danceObject = floorObjects.find((object) => object.type === "dance");
   const selectedObject = floorObjects.find((object) => object.id === selectedObjectId);
   const selectedTable = selectedObject?.type === "table" && selectedObject.linkedTableId
     ? tables.find((table) => table.id === selectedObject.linkedTableId)
@@ -4476,6 +4523,11 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
               ))}
               <button className="secondary-button compact-button" type="button" onClick={() => resizeSelectedObject(-0.02)} disabled={!selectedObject}><Minus aria-hidden="true" />Smaller</button>
               <button className="secondary-button compact-button" type="button" onClick={() => resizeSelectedObject(0.02)} disabled={!selectedObject}><Plus aria-hidden="true" />Bigger</button>
+              <div className="floor-zoom-controls" aria-label="Floor plan zoom controls">
+                <button className="icon-button" type="button" onClick={() => updateDesignerZoom(-0.2)} disabled={designerZoom <= 1} aria-label="Zoom floor plan out"><ZoomOut aria-hidden="true" /></button>
+                <span>{Math.round(designerZoom * 100)}%</span>
+                <button className="icon-button" type="button" onClick={() => updateDesignerZoom(0.2)} disabled={designerZoom >= 2.5} aria-label="Zoom floor plan in"><ZoomIn aria-hidden="true" /></button>
+              </div>
               <button className="icon-button" type="button" onClick={() => rotateSelectedObject(-45)} disabled={!selectedObject} aria-label="Rotate selected object left"><RotateCcw aria-hidden="true" /></button>
               <button className="icon-button" type="button" onClick={() => rotateSelectedObject(45)} disabled={!selectedObject} aria-label="Rotate selected object right"><RotateCw aria-hidden="true" /></button>
               {selectedObject ? (
@@ -4496,7 +4548,18 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
               {selectedObject ? <span className="designer-selection">Selected: {selectedObject.label}</span> : null}
             </div>
 
-            <div className="floor-designer-canvas" ref={floorDesignerCanvasRef} onDragOver={(dragEvent) => dragEvent.preventDefault()} onDrop={moveObject} aria-label="Drag tables and venue sections to arrange the floor plan">
+            <div className="floor-designer-viewport">
+            <div
+              className="floor-designer-canvas"
+              ref={floorDesignerCanvasRef}
+              onDragOver={(dragEvent) => dragEvent.preventDefault()}
+              onDrop={moveObject}
+              aria-label="Drag tables and venue sections to arrange the floor plan"
+              style={{
+                minHeight: `${540 * designerZoom}px`,
+                minWidth: `${designerZoom * 100}%`,
+              }}
+            >
               {floorObjects.map((object) => {
                 const objectTable = object.type === "table" && object.linkedTableId
                   ? tables.find((table) => table.id === object.linkedTableId)
@@ -4538,7 +4601,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                       <div className="table-seat-marker-layer">
                         {seatNumbersForTable(objectTable).map((seatNumber, index, seats) => {
                           const occupant = objectSeatGuests.get(seatNumber);
-                          const seatPosition = seatPositionForObject(object, seatNumber, index, seats.length);
+                          const seatPosition = seatPositionForObject(object, seatNumber, index, seats.length, danceObject);
                           return (
                             <button
                               className={`table-seat-marker ${occupant ? "filled" : "empty"} ${selectedTable?.id === objectTable.id && selectedSeatNumber === seatNumber ? "selected" : ""}`}
@@ -4563,6 +4626,7 @@ function FloorPlanAdminPage({ event, token, activeSubsection }: { event: AdminEv
                   </div>
                 );
               })}
+            </div>
             </div>
           </div>
 

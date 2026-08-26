@@ -2667,6 +2667,31 @@ p {
   margin-bottom: 12px;
 }
 
+.floor-zoom-controls {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px;
+  border: 1px solid rgba(20, 20, 22, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.floor-zoom-controls span {
+  min-width: 44px;
+  color: #69696e;
+  font-size: 12px;
+  font-weight: 850;
+  text-align: center;
+}
+
+.floor-designer-viewport {
+  max-width: 100%;
+  overflow: auto;
+  border-radius: 12px;
+}
+
 .design-export-actions {
   align-items: center;
 }
