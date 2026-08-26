@@ -1384,7 +1384,6 @@ namespace Sassoir.Api.Data
         {
             return _db.GuestMessages
                 .AsNoTracking()
-                .Include(item => item.Guest)
                 .Where(item => item.EventId == eventId)
                 .OrderByDescending(item => item.CreatedAt)
                 .Select(item => new AdminGuestMessageDto(

@@ -4738,7 +4738,18 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
   const published = eventStatusText(event.status).toLowerCase() === "published";
   const publicUrl = getEventPublicUrl(event);
   const [messages, setMessages] = useState<AdminGuestMessage[]>([]);
+  const [messagePage, setMessagePage] = useState(1);
+  const [totalMessageCount, setTotalMessageCount] = useState(0);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [exportingMessages, setExportingMessages] = useState(false);
+  const messagesPerPage = 25;
+  const totalMessagePages = Math.max(1, Math.ceil(totalMessageCount / messagesPerPage));
+
+  useEffect(() => {
+    setMessagePage(1);
+    setMessages([]);
+    setTotalMessageCount(0);
+  }, [activeSubsection, event.id, published]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4747,14 +4758,24 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
     async function loadMessages() {
       setLoadingMessages(true);
       try {
-        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/messages`), {
+        const params = new URLSearchParams({
+          page: String(messagePage),
+          pageSize: String(messagesPerPage),
+        });
+        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/messages/page?${params.toString()}`), {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) throw new Error("Could not load messages.");
-        const payload = (await response.json()) as AdminGuestMessage[];
-        if (!cancelled) setMessages(payload);
+        const payload = (await response.json()) as PaginatedResponse<AdminGuestMessage>;
+        if (!cancelled) {
+          setMessages(payload.items);
+          setTotalMessageCount(payload.totalCount);
+        }
       } catch {
-        if (!cancelled) setMessages([]);
+        if (!cancelled) {
+          setMessages([]);
+          setTotalMessageCount(0);
+        }
       } finally {
         if (!cancelled) setLoadingMessages(false);
       }
@@ -4764,15 +4785,44 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
     return () => {
       cancelled = true;
     };
-  }, [activeSubsection, event.id, published, token]);
+  }, [activeSubsection, event.id, messagePage, published, token]);
 
-  function exportMessages() {
+  async function exportMessages() {
+    setExportingMessages(true);
+    const exportedMessages: AdminGuestMessage[] = [];
+    try {
+      let page = 1;
+      let totalPages = 1;
+      do {
+        const params = new URLSearchParams({
+          page: String(page),
+          pageSize: "100",
+        });
+        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/messages/page?${params.toString()}`), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("Could not export messages.");
+        const payload = (await response.json()) as PaginatedResponse<AdminGuestMessage>;
+        exportedMessages.push(...payload.items);
+        totalPages = Math.max(1, Math.ceil(payload.totalCount / payload.pageSize));
+        page += 1;
+      } while (page <= totalPages);
+    } catch {
+      alert("Could not export guest messages.");
+      setExportingMessages(false);
+      return;
+    }
+
     const lines = ["Guest Name,Message,Created At"];
-    messages.forEach((message) => {
+    exportedMessages.forEach((message) => {
       lines.push([message.guestName, message.message, new Date(message.createdAt).toLocaleString()].map(csvCell).join(","));
     });
     downloadTextFile(`${slugify(event.name || "event")}-guest-messages.csv`, `${lines.join("\n")}\n`, "text/csv");
+    setExportingMessages(false);
   }
+
+  const messagePageStart = totalMessageCount === 0 ? 0 : (messagePage - 1) * messagesPerPage + 1;
+  const messagePageEnd = Math.min(messagePage * messagesPerPage, totalMessageCount);
 
   return (
     <>
@@ -4816,7 +4866,7 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
               <p className="eyebrow">Guest messages</p>
               <h2>Messages guests left</h2>
             </div>
-            <button className="secondary-button compact-button" type="button" onClick={exportMessages} disabled={messages.length === 0}><Download aria-hidden="true" />Export</button>
+            <button className="secondary-button compact-button" type="button" onClick={exportMessages} disabled={exportingMessages || totalMessageCount === 0}><Download aria-hidden="true" />{exportingMessages ? "Exporting..." : "Export"}</button>
           </div>
           {published ? (
             <>
@@ -4830,6 +4880,16 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
                   </article>
                 ))}
               </div>
+              {totalMessageCount > 0 ? (
+                <div className="pagination">
+                  <span>Showing {messagePageStart}-{messagePageEnd} of {totalMessageCount}</span>
+                  <div className="page-nums" aria-label="Guest messages pagination">
+                    <button type="button" onClick={() => setMessagePage((current) => Math.max(1, current - 1))} disabled={messagePage <= 1}>‹</button>
+                    <button className="active" type="button">{messagePage}</button>
+                    <button type="button" onClick={() => setMessagePage((current) => Math.min(totalMessagePages, current + 1))} disabled={messagePage >= totalMessagePages}>›</button>
+                  </div>
+                </div>
+              ) : null}
               {!loadingMessages && messages.length === 0 ? <p className="empty-state">No guest messages yet.</p> : null}
             </>
           ) : (
