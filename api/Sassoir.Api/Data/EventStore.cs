@@ -412,6 +412,64 @@ namespace Sassoir.Api.Data
             return eventEntity is null ? null : ToEventDetails(eventEntity);
         }
 
+        public async Task<AdminEventDto?> GetAdminEventAsync(Guid id, CancellationToken cancellationToken)
+        {
+            var eventEntity = await _db.Events
+                .AsNoTracking()
+                .Where(item => item.Id == id)
+                .Select(item => new
+                {
+                    item.Id,
+                    item.Name,
+                    item.Slug,
+                    item.EventType,
+                    item.SeatingAssignmentMode,
+                    item.Subtitle,
+                    item.DateLabel,
+                    item.VenueName,
+                    item.VenueAddress,
+                    item.Status,
+                    HeroText = item.Theme == null ? string.Empty : item.Theme.HeroText,
+                    PrimaryColor = item.Theme == null ? "#D8CFBC" : item.Theme.PrimaryColor,
+                    SecondaryColor = item.Theme == null ? "#565449" : item.Theme.SecondaryColor,
+                    BackgroundColor = item.Theme == null ? "#FFFBF4" : item.Theme.BackgroundColor,
+                    TextColor = item.Theme == null ? "#11120D" : item.Theme.TextColor,
+                    WelcomeTitle = item.Theme == null || item.Theme.WelcomeTitle == string.Empty ? $"Welcome to {item.Name}" : item.Theme.WelcomeTitle,
+                    SearchInputLabel = item.Theme == null || item.Theme.SearchInputLabel == string.Empty ? "Search by name" : item.Theme.SearchInputLabel,
+                    SearchPlaceholder = item.Theme == null || item.Theme.SearchPlaceholder == string.Empty ? "Search by name" : item.Theme.SearchPlaceholder,
+                    HeroImageUrl = item.Theme == null ? null : item.Theme.HeroImageUrl,
+                    GuestCount = item.Guests.Count(guest => guest.Status != GuestStatus.Archived),
+                    AssignedSeatGuests = item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null && guest.SeatNumber != null && guest.SeatNumber != string.Empty),
+                    AssignedTableGuests = item.Guests.Count(guest => guest.Status != GuestStatus.Archived && guest.TableId != null)
+                })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (eventEntity is null) return null;
+
+            var seatingAssignmentMode = NormalizeSeatingAssignmentMode(eventEntity.SeatingAssignmentMode);
+            return new AdminEventDto(
+                eventEntity.Id,
+                eventEntity.Name,
+                eventEntity.Slug,
+                eventEntity.EventType,
+                seatingAssignmentMode,
+                eventEntity.Subtitle,
+                eventEntity.DateLabel,
+                eventEntity.VenueName,
+                eventEntity.VenueAddress,
+                eventEntity.Status,
+                eventEntity.HeroText,
+                eventEntity.PrimaryColor,
+                eventEntity.SecondaryColor,
+                eventEntity.BackgroundColor,
+                eventEntity.TextColor,
+                eventEntity.WelcomeTitle,
+                eventEntity.SearchInputLabel,
+                eventEntity.SearchPlaceholder,
+                eventEntity.HeroImageUrl,
+                eventEntity.GuestCount,
+                seatingAssignmentMode == "seat" ? eventEntity.AssignedSeatGuests : eventEntity.AssignedTableGuests);
+        }
+
         public async Task<FloorPlanDto?> GetAdminFloorPlanAsync(Guid eventId, CancellationToken cancellationToken)
         {
             var eventExists = await _db.Events

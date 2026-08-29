@@ -44,12 +44,12 @@ public static class AdminEventEndpoints
             return Results.Ok(await store.GetGuestMessagesPageAsync(id, page, pageSize, cancellationToken));
         });
 
-        app.MapGet("/api/admin/events/{id:guid}", (Guid id, HttpRequest request, AuthStore auth, EventStore store) =>
+        app.MapGet("/api/admin/events/{id:guid}", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, CancellationToken cancellationToken) =>
         {
             if (!auth.IsAdmin(request)) return Results.Unauthorized();
 
-            var eventDetails = store.GetEvent(id);
-            return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails.ToAdminDto());
+            var eventDetails = await store.GetAdminEventAsync(id, cancellationToken);
+            return eventDetails is null ? Results.NotFound() : Results.Ok(eventDetails);
         });
 
         app.MapPost("/api/admin/events", (AdminEventUpsertRequest request, HttpRequest httpRequest, AuthStore auth, EventStore store) =>
