@@ -44,6 +44,13 @@ public static class AdminEventEndpoints
             return Results.Ok(await store.GetGuestMessagesPageAsync(id, page, pageSize, cancellationToken));
         });
 
+        adminApi.MapGet("/events/{id:guid}/song-requests/page", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, int? page, int? pageSize, CancellationToken cancellationToken) =>
+        {
+            // TODO: Allow Event Planner and DJ roles once role-gated admin authorization is expanded beyond Admin/SuperAdmin.
+            if (!auth.IsAdmin(request)) return Results.Unauthorized();
+            return Results.Ok(await store.GetSongRequestsPageAsync(id, page, pageSize, cancellationToken));
+        });
+
         app.MapGet("/api/admin/events/{id:guid}", async (Guid id, HttpRequest request, AuthStore auth, EventStore store, CancellationToken cancellationToken) =>
         {
             if (!auth.IsAdmin(request)) return Results.Unauthorized();

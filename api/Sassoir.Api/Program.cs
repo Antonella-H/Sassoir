@@ -60,6 +60,7 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("PublicSearch", context => ApiConfiguration.FixedWindowPolicy(context, "RateLimiting:GuestSearchPerMinute", 30));
     options.AddPolicy("PublicSeat", context => ApiConfiguration.FixedWindowPolicy(context, "RateLimiting:SeatResultPerMinute", 30));
     options.AddPolicy("PublicMessage", context => ApiConfiguration.FixedWindowPolicy(context, "RateLimiting:GuestMessagePerMinute", 5));
+    options.AddPolicy("PublicSongRequest", context => ApiConfiguration.FixedWindowPolicy(context, "RateLimiting:GuestMessagePerMinute", 5));
 });
 
 var app = builder.Build();

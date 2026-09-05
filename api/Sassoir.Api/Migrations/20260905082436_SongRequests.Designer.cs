@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Sassoir.Api.Data;
@@ -11,9 +12,11 @@ using Sassoir.Api.Data;
 namespace Sassoir.Api.Migrations
 {
     [DbContext(typeof(SassoirDbContext))]
-    partial class SassoirDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260905082436_SongRequests")]
+    partial class SongRequests
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -130,11 +133,6 @@ namespace Sassoir.Api.Migrations
                         .IsRequired()
                         .HasColumnType("text")
                         .HasColumnName("date_label");
-
-                    b.Property<string>("DjAccessToken")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("dj_access_token");
 
                     b.Property<string>("Description")
                         .IsRequired()

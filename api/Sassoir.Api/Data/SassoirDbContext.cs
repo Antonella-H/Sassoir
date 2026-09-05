@@ -14,6 +14,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
     public DbSet<FloorPlanEntity> FloorPlans => Set<FloorPlanEntity>();
     public DbSet<FloorPlanObjectEntity> FloorPlanObjects => Set<FloorPlanObjectEntity>();
     public DbSet<GuestMessageEntity> GuestMessages => Set<GuestMessageEntity>();
+    public DbSet<SongRequestEntity> SongRequests => Set<SongRequestEntity>();
     public DbSet<SearchMetricEntity> SearchMetrics => Set<SearchMetricEntity>();
     public DbSet<ContactSubmissionEntity> ContactSubmissions => Set<ContactSubmissionEntity>();
     public DbSet<AppUserEntity> Users => Set<AppUserEntity>();
@@ -42,6 +43,7 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.OrganizationId).HasColumnName("organization_id");
             entity.Property(item => item.Name).HasColumnName("name");
             entity.Property(item => item.Slug).HasColumnName("slug");
+            entity.Property(item => item.DjAccessToken).HasColumnName("dj_access_token");
             entity.Property(item => item.EventType).HasColumnName("event_type");
             entity.Property(item => item.Subtitle).HasColumnName("subtitle");
             entity.Property(item => item.Description).HasColumnName("description");
@@ -180,6 +182,20 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.HasOne(item => item.Guest).WithMany().HasForeignKey(item => item.GuestId);
         });
 
+        modelBuilder.Entity<SongRequestEntity>(entity =>
+        {
+            entity.ToTable("song_requests");
+            entity.HasKey(item => item.Id);
+            entity.Property(item => item.Id).HasColumnName("id");
+            entity.Property(item => item.EventId).HasColumnName("event_id");
+            entity.Property(item => item.GuestId).HasColumnName("guest_id");
+            entity.Property(item => item.SongTitle).HasColumnName("song_title").HasMaxLength(200);
+            entity.Property(item => item.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+            entity.HasOne(item => item.Event).WithMany().HasForeignKey(item => item.EventId);
+            entity.HasOne(item => item.Guest).WithMany().HasForeignKey(item => item.GuestId);
+            entity.HasIndex(item => new { item.EventId, item.CreatedAt }).IsDescending(false, true).HasDatabaseName("ix_song_requests_event_created");
+        });
+
         modelBuilder.Entity<SearchMetricEntity>(entity =>
         {
             entity.ToTable("search_metrics");
@@ -257,6 +273,7 @@ public sealed class EventEntity
     public Guid OrganizationId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Slug { get; set; } = string.Empty;
+    public string DjAccessToken { get; set; } = string.Empty;
     public string EventType { get; set; } = "Wedding";
     public string Subtitle { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
@@ -385,6 +402,17 @@ public sealed class GuestMessageEntity
     public Guid GuestId { get; set; }
     public string Message { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
+    public GuestEntity? Guest { get; set; }
+}
+
+public sealed class SongRequestEntity
+{
+    public Guid Id { get; set; }
+    public Guid EventId { get; set; }
+    public Guid GuestId { get; set; }
+    public string SongTitle { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; set; }
+    public EventEntity? Event { get; set; }
     public GuestEntity? Guest { get; set; }
 }
 

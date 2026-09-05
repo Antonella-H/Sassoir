@@ -422,6 +422,7 @@ namespace Sassoir.Api.Data
                     item.Id,
                     item.Name,
                     item.Slug,
+                    item.DjAccessToken,
                     item.EventType,
                     item.SeatingAssignmentMode,
                     item.Subtitle,
@@ -450,6 +451,7 @@ namespace Sassoir.Api.Data
                 eventEntity.Id,
                 eventEntity.Name,
                 eventEntity.Slug,
+                eventEntity.DjAccessToken,
                 eventEntity.EventType,
                 seatingAssignmentMode,
                 eventEntity.Subtitle,
@@ -580,6 +582,7 @@ namespace Sassoir.Api.Data
                     item.Id,
                     item.Name,
                     item.Slug,
+                    item.DjAccessToken,
                     item.EventType,
                     item.SeatingAssignmentMode,
                     item.Subtitle,
@@ -631,6 +634,7 @@ namespace Sassoir.Api.Data
                     item.Id,
                     item.Name,
                     item.Slug,
+                    item.DjAccessToken,
                     item.EventType,
                     item.SeatingAssignmentMode,
                     item.Subtitle,
@@ -672,6 +676,7 @@ namespace Sassoir.Api.Data
                 OrganizationId = organization.Id,
                 Name = request.Name.Trim(),
                 Slug = slug,
+                DjAccessToken = BuildDjAccessToken(),
                 EventType = NormalizeEventType(request.EventType),
                 Subtitle = request.Subtitle?.Trim() ?? string.Empty,
                 Description = string.Empty,
@@ -1438,6 +1443,86 @@ namespace Sassoir.Api.Data
             return true;
         }
 
+        public async Task<PublicSongRequestDto?> SaveSongRequestAsync(string slug, string publicToken, string songTitle, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var guest = await _db.Guests
+                .AsNoTracking()
+                .Where(item => item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.PublicToken == publicToken)
+                .Select(item => new { item.Id, item.EventId })
+                .SingleOrDefaultAsync(cancellationToken);
+            if (guest is null) return null;
+
+            var entity = new SongRequestEntity
+            {
+                Id = Guid.NewGuid(),
+                EventId = guest.EventId,
+                GuestId = guest.Id,
+                SongTitle = songTitle,
+                CreatedAt = DateTimeOffset.UtcNow
+            };
+
+            _db.SongRequests.Add(entity);
+            await _db.SaveChangesAsync(cancellationToken);
+            return new PublicSongRequestDto(entity.Id, entity.SongTitle, entity.CreatedAt);
+        }
+
+        public async Task<PaginatedResponse<PublicSongRequestDto>?> GetPublicSongRequestsPageAsync(string slug, int? pageSize, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var eventId = await _db.Events
+                .AsNoTracking()
+                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published)
+                .Select(item => (Guid?)item.Id)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (eventId is null) return null;
+
+            var resolvedPageSize = Math.Clamp(pageSize ?? 20, 1, 50);
+            var query = _db.SongRequests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId.Value);
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderByDescending(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .Take(resolvedPageSize)
+                .Select(item => new PublicSongRequestDto(item.Id, item.SongTitle, item.CreatedAt))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<PublicSongRequestDto>(items, 1, resolvedPageSize, totalCount);
+        }
+
+        public async Task<PaginatedResponse<PublicSongRequestDto>?> GetDjSongRequestsPageAsync(string slug, string djAccessToken, int? page, int? pageSize, CancellationToken cancellationToken)
+        {
+            var normalizedSlug = NormalizeSlug(slug);
+            var token = djAccessToken.Trim();
+            if (string.IsNullOrWhiteSpace(token)) return null;
+
+            var eventId = await _db.Events
+                .AsNoTracking()
+                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published && item.DjAccessToken == token)
+                .Select(item => (Guid?)item.Id)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (eventId is null) return null;
+
+            var paging = NormalizePaging(page, pageSize);
+            var query = _db.SongRequests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId.Value);
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderByDescending(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .Skip((paging.Page - 1) * paging.PageSize)
+                .Take(paging.PageSize)
+                .Select(item => new PublicSongRequestDto(item.Id, item.SongTitle, item.CreatedAt))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<PublicSongRequestDto>(items, paging.Page, paging.PageSize, totalCount);
+        }
+
         public IReadOnlyList<AdminGuestMessageDto> GetGuestMessages(Guid eventId)
         {
             return _db.GuestMessages
@@ -1473,6 +1558,29 @@ namespace Sassoir.Api.Data
                 .ToArrayAsync(cancellationToken);
 
             return new PaginatedResponse<AdminGuestMessageDto>(items, paging.Page, paging.PageSize, totalCount);
+        }
+
+        public async Task<PaginatedResponse<AdminSongRequestDto>> GetSongRequestsPageAsync(Guid eventId, int? page, int? pageSize, CancellationToken cancellationToken)
+        {
+            var paging = NormalizePaging(page, pageSize);
+            var query = _db.SongRequests
+                .AsNoTracking()
+                .Where(item => item.EventId == eventId);
+
+            var totalCount = await query.CountAsync(cancellationToken);
+            var items = await query
+                .OrderByDescending(item => item.CreatedAt)
+                .ThenBy(item => item.Id)
+                .Skip((paging.Page - 1) * paging.PageSize)
+                .Take(paging.PageSize)
+                .Select(item => new AdminSongRequestDto(
+                    item.Id,
+                    item.Guest == null ? "Guest" : item.Guest.DisplayName,
+                    item.SongTitle,
+                    item.CreatedAt))
+                .ToArrayAsync(cancellationToken);
+
+            return new PaginatedResponse<AdminSongRequestDto>(items, paging.Page, paging.PageSize, totalCount);
         }
 
         public void TrackSearch(string slug, string normalizedQuery, bool successful)
@@ -1651,6 +1759,7 @@ namespace Sassoir.Api.Data
                 eventEntity.Id,
                 eventEntity.Name,
                 eventEntity.Slug,
+                eventEntity.DjAccessToken,
                 eventEntity.EventType,
                 NormalizeSeatingAssignmentMode(eventEntity.SeatingAssignmentMode),
                 eventEntity.Subtitle,
@@ -1740,6 +1849,14 @@ namespace Sassoir.Api.Data
 
             reservedTokens?.Add(token);
             return token;
+        }
+
+        private static string BuildDjAccessToken()
+        {
+            return Convert.ToBase64String(RandomNumberGenerator.GetBytes(24))
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
         }
 
         private static string BuildDisplayName(string firstName, string lastName, string? displayName)

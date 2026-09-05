@@ -10,6 +10,7 @@ public static class SeedData
             Guid.Parse("2eb2f4b0-67c8-4d99-a91f-caa1007084e8"),
             "Lichaa & Roula's Wedding",
             "lichaa-and-roula",
+            "demo-dj-access",
             "Wedding",
             "seat",
             "Together with their families, they welcome you to an evening of love, dinner, and dancing.",

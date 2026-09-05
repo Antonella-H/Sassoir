@@ -31,6 +31,7 @@ namespace Sassoir.Api.Data
                   organization_id uuid not null references organizations(id) on delete cascade,
                   name text not null,
                   slug text not null unique,
+                  dj_access_token text not null default '',
                   event_type text not null default 'Wedding',
                   subtitle text not null default '',
                   description text not null default '',
@@ -152,6 +153,14 @@ namespace Sassoir.Api.Data
                   created_at timestamptz not null default now()
                 );
 
+                create table if not exists song_requests (
+                  id uuid primary key default gen_random_uuid(),
+                  event_id uuid not null references events(id) on delete cascade,
+                  guest_id uuid not null references guests(id) on delete cascade,
+                  song_title varchar(200) not null,
+                  created_at timestamptz not null default now()
+                );
+
                 create table if not exists search_metrics (
                   id uuid primary key default gen_random_uuid(),
                   event_id uuid not null references events(id) on delete cascade,
@@ -204,12 +213,17 @@ namespace Sassoir.Api.Data
                 create index if not exists ix_floor_plan_objects_floor_plan_table on floor_plan_objects(floor_plan_id, linked_table_id);
                 create index if not exists ix_floor_plan_objects_floor_plan_visible_z on floor_plan_objects(floor_plan_id, is_visible, z_index);
                 create index if not exists ix_guest_messages_event_created on guest_messages(event_id, created_at desc);
+                create index if not exists ix_song_requests_event_created on song_requests(event_id, created_at desc);
                 create index if not exists ix_search_metrics_event_created on search_metrics(event_id, created_at);
                 create index if not exists ix_contact_submissions_submitted_at_utc on contact_submissions(submitted_at_utc desc);
                 create index if not exists ix_app_users_email on app_users(email);
 
                 alter table events add column if not exists seating_assignment_mode text not null default 'table';
+                alter table events add column if not exists dj_access_token text not null default '';
                 alter table floor_plan_objects add column if not exists seat_layout text not null default '[]';
+                update events
+                  set dj_access_token = replace(replace(trim(trailing '=' from encode(gen_random_bytes(24), 'base64')), '+', '-'), '/', '_')
+                  where dj_access_token = '';
             """);
         }
     }

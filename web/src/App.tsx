@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   BarChart3,
   CalendarDays,
+  ChevronDown,
   Check,
   ClipboardList,
   Download,
@@ -16,6 +17,7 @@ import {
   Map,
   MapPin,
   Minus,
+  Music,
   Pencil,
   Plus,
   QrCode,
@@ -145,6 +147,19 @@ type AdminGuestMessage = {
   id: string;
   guestName: string;
   message: string;
+  createdAt: string;
+};
+
+type PublicSongRequest = {
+  id: string;
+  songTitle: string;
+  createdAt: string;
+};
+
+type AdminSongRequest = {
+  id: string;
+  guestName: string;
+  songTitle: string;
   createdAt: string;
 };
 
@@ -392,6 +407,7 @@ type AdminEvent = {
   id: string;
   name: string;
   slug: string;
+  djAccessToken: string;
   eventType: string;
   seatingAssignmentMode: "table" | "seat";
   subtitle: string;
@@ -530,6 +546,7 @@ const fallbackAdminEvents: AdminEvent[] = [
     id: "2eb2f4b0-67c8-4d99-a91f-caa1007084e8",
     name: fallbackEvent.name,
     slug: fallbackEvent.slug,
+    djAccessToken: "demo-dj-access",
     eventType: fallbackEvent.eventType,
     seatingAssignmentMode: "seat",
     subtitle: fallbackEvent.subtitle,
@@ -669,6 +686,10 @@ const eventFormSections: EventSectionDefinition[] = [
         name: "Guest messages",
         fields: [],
       },
+      {
+        name: "Song requests",
+        fields: [],
+      },
     ],
   },
 ];
@@ -687,6 +708,15 @@ function getRoute() {
     return {
       area: "public" as const,
       eventSlug: decodeURIComponent(eventMatch[1]),
+    };
+  }
+
+  const djMatch = path.match(/^\/dj\/([^/]+)\/([^/]+)/);
+  if (djMatch?.[1] && djMatch?.[2]) {
+    return {
+      area: "dj" as const,
+      eventSlug: decodeURIComponent(djMatch[1]),
+      djAccessToken: decodeURIComponent(djMatch[2]),
     };
   }
 
@@ -959,6 +989,7 @@ function RoutedApp() {
   }, []);
 
   if (route.area === "landing") return <LandingPage />;
+  if (route.area === "dj") return <DjSongRequestsPage eventSlug={route.eventSlug} djAccessToken={route.djAccessToken} />;
   return route.area === "admin" ? <AdminDashboard page={route.adminPage} /> : <PublicGuestExperience eventSlug={route.eventSlug} />;
 }
 
@@ -1644,6 +1675,90 @@ function WelcomeScreen({ event, query, results, loading, apiOnline, searchTouche
   );
 }
 
+function DjSongRequestsPage({ eventSlug, djAccessToken }: { eventSlug: string; djAccessToken: string }) {
+  const [requests, setRequests] = useState<PublicSongRequest[]>([]);
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const pageSize = 25;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+
+  const loadRequests = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      const response = await fetch(apiUrl(`/api/public/events/${eventSlug}/dj/${djAccessToken}/song-requests?${params.toString()}`));
+      if (!response.ok) throw new Error(response.status === 404 ? "This DJ link is invalid or the event is not published." : await readError(response));
+      const payload = (await response.json()) as PaginatedResponse<PublicSongRequest>;
+      setRequests(payload.items);
+      setTotalCount(payload.totalCount);
+    } catch (loadError) {
+      setRequests([]);
+      setTotalCount(0);
+      setError(loadError instanceof Error ? loadError.message : "Could not load song requests.");
+    } finally {
+      setLoading(false);
+    }
+  }, [djAccessToken, eventSlug, page]);
+
+  useEffect(() => {
+    void loadRequests();
+  }, [loadRequests]);
+
+  const pageStart = totalCount === 0 ? 0 : (page - 1) * pageSize + 1;
+  const pageEnd = Math.min(page * pageSize, totalCount);
+
+  return (
+    <main className="page-shell public-shell">
+      <section className="dj-requests-screen" aria-label="DJ song requests">
+        <header className="dj-requests-header">
+          <div>
+            <p className="eyebrow">DJ view</p>
+            <h1>Song requests</h1>
+            <span>{eventSlug.replace(/-/g, " ")}</span>
+          </div>
+          <button className="secondary-button compact-button" type="button" onClick={() => void loadRequests()} disabled={loading}><RotateCcw aria-hidden="true" />{loading ? "Refreshing..." : "Refresh"}</button>
+        </header>
+
+        {error ? <p className="form-error" role="alert">{error}</p> : null}
+
+        <section className="dj-request-list" aria-label="Requested songs">
+          {requests.map((request, index) => (
+            <article className="dj-request-card" key={request.id}>
+              <span>{pageStart + index}</span>
+              <strong>{request.songTitle}</strong>
+              <time dateTime={request.createdAt}>{new Date(request.createdAt).toLocaleString()}</time>
+            </article>
+          ))}
+          {!loading && !error && requests.length === 0 ? <p className="empty-state">No song requests yet.</p> : null}
+          {loading && requests.length === 0 ? <p className="admin-muted" role="status">Loading song requests...</p> : null}
+        </section>
+
+        {totalCount > 0 ? (
+          <div className="pagination dj-pagination">
+            <span>Showing {pageStart}-{pageEnd} of {totalCount}</span>
+            <div className="page-nums" aria-label="DJ song requests pagination">
+              <button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1}>‹</button>
+              <button className="active" type="button">{page}</button>
+              <button type="button" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page >= totalPages}>›</button>
+            </div>
+          </div>
+        ) : null}
+
+        <a className="guest-seat-logo-link" href="/" aria-label="Go to S'assoir home">
+          <img className="guest-seat-logo" src="/sassoir-logo-sentence.png" alt="S'assoir - Scan. Sit. Share." />
+        </a>
+      </section>
+    </main>
+  );
+}
+
 function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessageChange, onSendMessage }: {
   event: PublicEvent;
   guest: Guest;
@@ -1654,8 +1769,94 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
   onMessageChange: (value: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
 }) {
+  const [openSections, setOpenSections] = useState<Record<GuestSeatSectionKey, boolean>>({
+    floorPlan: true,
+    table: false,
+    message: false,
+    song: false,
+  });
+  const [songTitle, setSongTitle] = useState("");
+  const [songRequests, setSongRequests] = useState<PublicSongRequest[]>([]);
+  const [songRequestsLoaded, setSongRequestsLoaded] = useState(false);
+  const [loadingSongRequests, setLoadingSongRequests] = useState(false);
+  const [songSubmitState, setSongSubmitState] = useState<"idle" | "sending" | "success" | "error">("idle");
+  const [songMessage, setSongMessage] = useState("");
   const tableGuests = guest.companions.length > 0 ? guest.companions : [guest.groupLabel].filter(Boolean);
   const tableLabel = guest.tableName || guest.tableCode;
+
+  useEffect(() => {
+    setOpenSections({ floorPlan: true, table: false, message: false, song: false });
+    setSongTitle("");
+    setSongRequests([]);
+    setSongRequestsLoaded(false);
+    setLoadingSongRequests(false);
+    setSongSubmitState("idle");
+    setSongMessage("");
+  }, [event.slug, guest.publicToken]);
+
+  const toggleSection = (section: GuestSeatSectionKey) => {
+    setOpenSections((current) => ({ ...current, [section]: !current[section] }));
+  };
+
+  const loadSongRequests = useCallback(async () => {
+    setLoadingSongRequests(true);
+
+    try {
+      const response = await fetch(apiUrl(`/api/public/events/${event.slug}/song-requests?pageSize=20`));
+      if (!response.ok) throw new Error(await readError(response));
+      const payload = (await response.json()) as PaginatedResponse<PublicSongRequest>;
+      setSongRequests(payload.items);
+      setSongRequestsLoaded(true);
+    } catch (loadError) {
+      setSongMessage(loadError instanceof Error ? loadError.message : "Could not load song requests.");
+      setSongSubmitState("error");
+      setSongRequestsLoaded(true);
+    } finally {
+      setLoadingSongRequests(false);
+    }
+  }, [event.slug]);
+
+  useEffect(() => {
+    if (openSections.song && !songRequestsLoaded && !loadingSongRequests) {
+      void loadSongRequests();
+    }
+  }, [loadSongRequests, loadingSongRequests, openSections.song, songRequestsLoaded]);
+
+  async function sendSongRequest(formEvent: FormEvent<HTMLFormElement>) {
+    formEvent.preventDefault();
+    const trimmedSongTitle = songTitle.trim();
+    if (!trimmedSongTitle) {
+      setSongSubmitState("error");
+      setSongMessage("Song title is required.");
+      return;
+    }
+
+    if (trimmedSongTitle.length > 200) {
+      setSongSubmitState("error");
+      setSongMessage("Song title must be 200 characters or fewer.");
+      return;
+    }
+
+    setSongSubmitState("sending");
+    setSongMessage("");
+
+    try {
+      const response = await fetch(apiUrl(`/api/public/events/${event.slug}/guests/${guest.publicToken}/song-requests`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ songTitle: trimmedSongTitle }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+
+      setSongTitle("");
+      setSongSubmitState("success");
+      setSongMessage("Sent to DJ.");
+      await loadSongRequests();
+    } catch (submitError) {
+      setSongSubmitState("error");
+      setSongMessage(submitError instanceof Error ? submitError.message : "Could not send the song request.");
+    }
+  }
 
   return (
     <div className="app-screen guest-seat-screen">
@@ -1668,27 +1869,129 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
           <span>Please find your way to your table</span>
         </header>
 
-        <GuestFloorPlan floorObjects={floorObjects} tableCode={guest.tableCode} seatNumber={guest.seatNumber ?? null} showSeats={isSeatBasedEvent(event) || Boolean(guest.seatNumber)} />
+        <div className="guest-seat-accordion">
+          <GuestAccordionSection
+            icon={<Map aria-hidden="true" />}
+            open={openSections.floorPlan}
+            sectionKey="floorPlan"
+            subtitle="Follow the highlighted route to your table"
+            title="Floor plan"
+            onToggle={() => toggleSection("floorPlan")}
+          >
+            <GuestFloorPlan floorObjects={floorObjects} tableCode={guest.tableCode} seatNumber={guest.seatNumber ?? null} showSeats={isSeatBasedEvent(event) || Boolean(guest.seatNumber)} />
+          </GuestAccordionSection>
 
-        <section className="guest-table-names" aria-label={`Guests at table ${guest.tableCode}`}>
-          <p>You can find on your table</p>
-          <div>
-            {tableGuests.map((companion) => <span key={companion}>{companion}</span>)}
-          </div>
-        </section>
+          <GuestAccordionSection
+            icon={<Users aria-hidden="true" />}
+            open={openSections.table}
+            sectionKey="table"
+            subtitle="See who is seated with you"
+            title="On your table"
+            onToggle={() => toggleSection("table")}
+          >
+            <section className="guest-table-names" aria-label={`Guests at table ${guest.tableCode}`}>
+              <p>You can find on your table</p>
+              <div>
+                {tableGuests.map((companion) => <span key={companion}>{companion}</span>)}
+              </div>
+            </section>
+          </GuestAccordionSection>
 
-        <form className="guest-message-form" onSubmit={onSendMessage}>
-          <label htmlFor="guest-message">Leave a message to the newlyweds</label>
-          <textarea id="guest-message" value={message} onChange={(event) => onMessageChange(event.target.value)} rows={5} placeholder="Write your message..." />
-          <button type="submit">Leave a Message</button>
-          {sent ? <p role="status">Message saved. Thank you.</p> : null}
-        </form>
+          <GuestAccordionSection
+            icon={<Send aria-hidden="true" />}
+            open={openSections.message}
+            sectionKey="message"
+            subtitle="Share a note with the newlyweds"
+            title="Leave a message"
+            onToggle={() => toggleSection("message")}
+          >
+            <form className="guest-message-form" onSubmit={onSendMessage}>
+              <label htmlFor="guest-message">Leave a message to the newlyweds</label>
+              <textarea id="guest-message" value={message} onChange={(event) => onMessageChange(event.target.value)} rows={5} placeholder="Write your message..." />
+              <button type="submit">Leave a Message</button>
+              {sent ? <p role="status">Message saved. Thank you.</p> : null}
+            </form>
+          </GuestAccordionSection>
+
+          <GuestAccordionSection
+            icon={<Music aria-hidden="true" />}
+            open={openSections.song}
+            sectionKey="song"
+            subtitle="Send a song idea to the DJ"
+            title="Request a song"
+            onToggle={() => toggleSection("song")}
+          >
+            <form className="guest-message-form guest-song-form" onSubmit={sendSongRequest}>
+              <label htmlFor="guest-song-title">Song title</label>
+              <input
+                id="guest-song-title"
+                maxLength={200}
+                onChange={(formEvent) => {
+                  setSongTitle(formEvent.target.value);
+                  if (songSubmitState === "error") {
+                    setSongSubmitState("idle");
+                    setSongMessage("");
+                  }
+                }}
+                placeholder="Type a song for the dance floor"
+                type="text"
+                value={songTitle}
+              />
+              <button type="submit" disabled={songSubmitState === "sending"}>{songSubmitState === "sending" ? "Sending..." : "Send to DJ"}</button>
+              {songMessage ? <p className={songSubmitState === "error" ? "guest-form-error" : ""} role={songSubmitState === "error" ? "alert" : "status"}>{songMessage}</p> : null}
+            </form>
+
+            <section className="guest-song-requests" aria-label="Recently requested songs">
+              <p>Recently requested</p>
+              {loadingSongRequests ? <span role="status">Loading requests...</span> : null}
+              {!loadingSongRequests && songRequests.length === 0 ? <span>No song requests yet.</span> : null}
+              {songRequests.map((request) => (
+                <article key={request.id}>
+                  <strong>{request.songTitle}</strong>
+                  <time dateTime={request.createdAt}>{new Date(request.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>
+                </article>
+              ))}
+            </section>
+          </GuestAccordionSection>
+        </div>
 
         <a className="guest-seat-logo-link" href="/" aria-label="Go to S'assoir home">
           <img className="guest-seat-logo" src="/sassoir-logo-sentence.png" alt="S'assoir - Scan. Sit. Share." />
         </a>
       </section>
     </div>
+  );
+}
+
+type GuestSeatSectionKey = "floorPlan" | "table" | "message" | "song";
+
+function GuestAccordionSection({ children, icon, open, sectionKey, subtitle, title, onToggle }: {
+  children: ReactNode;
+  icon: ReactNode;
+  open: boolean;
+  sectionKey: GuestSeatSectionKey;
+  subtitle: string;
+  title: string;
+  onToggle: () => void;
+}) {
+  const panelId = `guest-seat-section-${sectionKey}`;
+
+  return (
+    <section className={`guest-accordion-section ${open ? "open" : ""}`}>
+      <button className="guest-accordion-trigger" type="button" aria-controls={panelId} aria-expanded={open} onClick={onToggle}>
+        <span className="guest-accordion-icon">{icon}</span>
+        <span className="guest-accordion-copy">
+          <strong>{title}</strong>
+          <small>{subtitle}</small>
+        </span>
+        <ChevronDown className="guest-accordion-chevron" aria-hidden="true" />
+      </button>
+      <div className="guest-accordion-panel" id={panelId} aria-hidden={!open}>
+        <div className="guest-accordion-panel-inner">
+          {children}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -2246,6 +2549,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         id: editingEventId ?? crypto.randomUUID(),
         name: draft.name,
         slug: draft.slug,
+        djAccessToken: editingEventId ? events.find((event) => event.id === editingEventId)?.djAccessToken ?? crypto.randomUUID() : crypto.randomUUID(),
         eventType: draft.eventType,
         seatingAssignmentMode: draft.seatingAssignmentMode,
         subtitle: draft.subtitle,
@@ -4738,17 +5042,28 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
   const published = eventStatusText(event.status).toLowerCase() === "published";
   const publicUrl = getEventPublicUrl(event);
   const [messages, setMessages] = useState<AdminGuestMessage[]>([]);
+  const [songRequests, setSongRequests] = useState<AdminSongRequest[]>([]);
   const [messagePage, setMessagePage] = useState(1);
+  const [songRequestPage, setSongRequestPage] = useState(1);
   const [totalMessageCount, setTotalMessageCount] = useState(0);
+  const [totalSongRequestCount, setTotalSongRequestCount] = useState(0);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [loadingSongRequests, setLoadingSongRequests] = useState(false);
   const [exportingMessages, setExportingMessages] = useState(false);
+  const [copiedDjLink, setCopiedDjLink] = useState(false);
   const messagesPerPage = 25;
+  const songRequestsPerPage = 25;
   const totalMessagePages = Math.max(1, Math.ceil(totalMessageCount / messagesPerPage));
+  const totalSongRequestPages = Math.max(1, Math.ceil(totalSongRequestCount / songRequestsPerPage));
+  const djUrl = getEventDjUrl(event);
 
   useEffect(() => {
     setMessagePage(1);
+    setSongRequestPage(1);
     setMessages([]);
+    setSongRequests([]);
     setTotalMessageCount(0);
+    setTotalSongRequestCount(0);
   }, [activeSubsection, event.id, published]);
 
   useEffect(() => {
@@ -4787,6 +5102,42 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
     };
   }, [activeSubsection, event.id, messagePage, published, token]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!token) return;
+
+    async function loadSongRequests() {
+      setLoadingSongRequests(true);
+      try {
+        const params = new URLSearchParams({
+          page: String(songRequestPage),
+          pageSize: String(songRequestsPerPage),
+        });
+        const response = await fetch(apiUrl(`/api/admin/events/${event.id}/song-requests/page?${params.toString()}`), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error("Could not load song requests.");
+        const payload = (await response.json()) as PaginatedResponse<AdminSongRequest>;
+        if (!cancelled) {
+          setSongRequests(payload.items);
+          setTotalSongRequestCount(payload.totalCount);
+        }
+      } catch {
+        if (!cancelled) {
+          setSongRequests([]);
+          setTotalSongRequestCount(0);
+        }
+      } finally {
+        if (!cancelled) setLoadingSongRequests(false);
+      }
+    }
+
+    if (published && activeSubsection === "Song requests") void loadSongRequests();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSubsection, event.id, published, songRequestPage, token]);
+
   async function exportMessages() {
     setExportingMessages(true);
     const exportedMessages: AdminGuestMessage[] = [];
@@ -4821,8 +5172,17 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
     setExportingMessages(false);
   }
 
+  async function copyDjUrl() {
+    if (!djUrl) return;
+    await navigator.clipboard.writeText(djUrl);
+    setCopiedDjLink(true);
+    window.setTimeout(() => setCopiedDjLink(false), 1800);
+  }
+
   const messagePageStart = totalMessageCount === 0 ? 0 : (messagePage - 1) * messagesPerPage + 1;
   const messagePageEnd = Math.min(messagePage * messagesPerPage, totalMessageCount);
+  const songRequestPageStart = totalSongRequestCount === 0 ? 0 : (songRequestPage - 1) * songRequestsPerPage + 1;
+  const songRequestPageEnd = Math.min(songRequestPage * songRequestsPerPage, totalSongRequestCount);
 
   return (
     <>
@@ -4894,6 +5254,52 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
             </>
           ) : (
             <p className="empty-state">Publish this event before collecting guest messages.</p>
+          )}
+        </section>
+      ) : null}
+
+      {activeSubsection === "Song requests" ? (
+        <section className="admin-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Song requests</p>
+              <h2>Requests sent to the DJ</h2>
+            </div>
+            {loadingSongRequests ? <span className="api-status">Loading...</span> : null}
+          </div>
+          {published ? (
+            <>
+              <div className="setup-copy dj-share-link">
+                <strong>DJ public link</strong>
+                <p>{djUrl || "Save this event again to generate a DJ link."}</p>
+                <div className="event-actions">
+                  {djUrl ? <a className="secondary-button compact-button" href={djUrl} target="_blank" rel="noreferrer"><Eye aria-hidden="true" />Open</a> : null}
+                  {djUrl ? <button className="primary-button compact-button" type="button" onClick={() => void copyDjUrl()}>{copiedDjLink ? "Copied" : "Copy link"}</button> : null}
+                </div>
+              </div>
+              <div className="message-list">
+                {songRequests.map((request) => (
+                  <article className="message-card" key={request.id}>
+                    <strong>{request.songTitle}</strong>
+                    <p>Requested by {request.guestName}</p>
+                    <span>{new Date(request.createdAt).toLocaleString()}</span>
+                  </article>
+                ))}
+              </div>
+              {totalSongRequestCount > 0 ? (
+                <div className="pagination">
+                  <span>Showing {songRequestPageStart}-{songRequestPageEnd} of {totalSongRequestCount}</span>
+                  <div className="page-nums" aria-label="Song requests pagination">
+                    <button type="button" onClick={() => setSongRequestPage((current) => Math.max(1, current - 1))} disabled={songRequestPage <= 1}>‹</button>
+                    <button className="active" type="button">{songRequestPage}</button>
+                    <button type="button" onClick={() => setSongRequestPage((current) => Math.min(totalSongRequestPages, current + 1))} disabled={songRequestPage >= totalSongRequestPages}>›</button>
+                  </div>
+                </div>
+              ) : null}
+              {!loadingSongRequests && songRequests.length === 0 ? <p className="empty-state">No song requests yet.</p> : null}
+            </>
+          ) : (
+            <p className="empty-state">Publish this event before collecting song requests.</p>
           )}
         </section>
       ) : null}
@@ -5409,6 +5815,11 @@ function buildGuestDisplayName(firstName: string, lastName: string) {
 function getEventPublicUrl(event: AdminEvent) {
   const origin = typeof window === "undefined" ? "" : window.location.origin;
   return `${origin}/e/${event.slug}`;
+}
+
+function getEventDjUrl(event: AdminEvent) {
+  const origin = typeof window === "undefined" ? "" : window.location.origin;
+  return event.djAccessToken ? `${origin}/dj/${event.slug}/${event.djAccessToken}` : "";
 }
 
 function downloadEventQr(event: AdminEvent) {

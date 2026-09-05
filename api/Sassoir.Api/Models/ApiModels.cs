@@ -19,6 +19,7 @@ namespace Sassoir.Api.Models
         Guid Id,
         string Name,
         string Slug,
+        string DjAccessToken,
         string EventType,
         string SeatingAssignmentMode,
         string Subtitle,
@@ -176,6 +177,7 @@ namespace Sassoir.Api.Models
         Guid Id,
         string Name,
         string Slug,
+        string DjAccessToken,
         string EventType,
         string SeatingAssignmentMode,
         string Subtitle,
@@ -235,6 +237,12 @@ namespace Sassoir.Api.Models
 
     public sealed record AdminGuestMessageDto(Guid Id, string GuestName, string Message, DateTimeOffset CreatedAt);
 
+    public sealed record SongRequestCreateRequest(string SongTitle);
+
+    public sealed record PublicSongRequestDto(Guid Id, string SongTitle, DateTimeOffset CreatedAt);
+
+    public sealed record AdminSongRequestDto(Guid Id, string GuestName, string SongTitle, DateTimeOffset CreatedAt);
+
     public sealed record ContactSubmissionRequest(string Name, string Email, string Message);
 
     public sealed record ContactSubmissionDto(Guid Id, string Name, string Email, string Message, DateTimeOffset SubmittedAtUtc);
@@ -267,6 +275,7 @@ namespace Sassoir.Api.Models
                 eventDetails.Id,
                 eventDetails.Name,
                 eventDetails.Slug,
+                eventDetails.DjAccessToken,
                 eventDetails.EventType,
                 eventDetails.SeatingAssignmentMode,
                 eventDetails.Subtitle,
