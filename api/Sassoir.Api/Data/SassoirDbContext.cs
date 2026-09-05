@@ -51,6 +51,10 @@ public sealed class SassoirDbContext(DbContextOptions<SassoirDbContext> options)
             entity.Property(item => item.VenueName).HasColumnName("venue_name");
             entity.Property(item => item.VenueAddress).HasColumnName("venue_address");
             entity.Property(item => item.SeatingAssignmentMode).HasColumnName("seating_assignment_mode");
+            entity.Property(item => item.EnableFloorPlan).HasColumnName("enable_floor_plan");
+            entity.Property(item => item.EnableTableCompanions).HasColumnName("enable_table_companions");
+            entity.Property(item => item.EnableGuestMessages).HasColumnName("enable_guest_messages");
+            entity.Property(item => item.EnableSongRequests).HasColumnName("enable_song_requests");
             entity.Property(item => item.Status).HasColumnName("status").HasConversion<string>();
             entity.Property(item => item.IsPublic).HasColumnName("is_public");
             entity.Property(item => item.PublishedAt).HasColumnName("published_at");
@@ -281,6 +285,10 @@ public sealed class EventEntity
     public string VenueName { get; set; } = string.Empty;
     public string VenueAddress { get; set; } = string.Empty;
     public string SeatingAssignmentMode { get; set; } = "table";
+    public bool EnableFloorPlan { get; set; } = true;
+    public bool EnableTableCompanions { get; set; } = true;
+    public bool EnableGuestMessages { get; set; } = true;
+    public bool EnableSongRequests { get; set; } = true;
     public EventStatus Status { get; set; }
     public bool IsPublic { get; set; }
     public DateTimeOffset? PublishedAt { get; set; }

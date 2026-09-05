@@ -39,6 +39,10 @@ namespace Sassoir.Api.Data
                   venue_name text not null default '',
                   venue_address text not null default '',
                   seating_assignment_mode text not null default 'table',
+                  enable_floor_plan boolean not null default true,
+                  enable_table_companions boolean not null default true,
+                  enable_guest_messages boolean not null default true,
+                  enable_song_requests boolean not null default true,
                   status text not null default 'Draft',
                   is_public boolean not null default false,
                   published_at timestamptz,
@@ -220,6 +224,10 @@ namespace Sassoir.Api.Data
 
                 alter table events add column if not exists seating_assignment_mode text not null default 'table';
                 alter table events add column if not exists dj_access_token text not null default '';
+                alter table events add column if not exists enable_floor_plan boolean not null default true;
+                alter table events add column if not exists enable_table_companions boolean not null default true;
+                alter table events add column if not exists enable_guest_messages boolean not null default true;
+                alter table events add column if not exists enable_song_requests boolean not null default true;
                 alter table floor_plan_objects add column if not exists seat_layout text not null default '[]';
                 update events
                   set dj_access_token = replace(replace(trim(trailing '=' from encode(gen_random_bytes(24), 'base64')), '+', '-'), '/', '_')

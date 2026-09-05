@@ -17,6 +17,10 @@ public static class SeedData
             "Saturday, August 22",
             "The Olive Garden Venue",
             "Beirut, Lebanon",
+            true,
+            true,
+            true,
+            true,
             EventStatus.Published,
             new EventTheme(
                 "L & R",

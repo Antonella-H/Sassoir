@@ -72,6 +72,10 @@ namespace Sassoir.Api.Data
                         item.DateLabel,
                         item.VenueName,
                         item.VenueAddress,
+                        item.EnableFloorPlan,
+                        item.EnableTableCompanions,
+                        item.EnableGuestMessages,
+                        item.EnableSongRequests,
                         new EventTheme(
                             item.Theme == null || item.Theme.LogoText == string.Empty ? item.Name : item.Theme.LogoText,
                             item.Theme == null ? string.Empty : item.Theme.HeroText,
@@ -112,7 +116,7 @@ namespace Sassoir.Api.Data
 
                 var floorPlan = await _db.FloorPlans
                     .AsNoTracking()
-                    .Where(item => item.IsActive && item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published)
+                    .Where(item => item.IsActive && item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.Event.EnableFloorPlan)
                     .OrderByDescending(item => item.Version)
                     .Select(item => new
                     {
@@ -429,6 +433,10 @@ namespace Sassoir.Api.Data
                     item.DateLabel,
                     item.VenueName,
                     item.VenueAddress,
+                    item.EnableFloorPlan,
+                    item.EnableTableCompanions,
+                    item.EnableGuestMessages,
+                    item.EnableSongRequests,
                     item.Status,
                     HeroText = item.Theme == null ? string.Empty : item.Theme.HeroText,
                     PrimaryColor = item.Theme == null ? "#D8CFBC" : item.Theme.PrimaryColor,
@@ -458,6 +466,10 @@ namespace Sassoir.Api.Data
                 eventEntity.DateLabel,
                 eventEntity.VenueName,
                 eventEntity.VenueAddress,
+                eventEntity.EnableFloorPlan,
+                eventEntity.EnableTableCompanions,
+                eventEntity.EnableGuestMessages,
+                eventEntity.EnableSongRequests,
                 eventEntity.Status,
                 eventEntity.HeroText,
                 eventEntity.PrimaryColor,
@@ -589,6 +601,10 @@ namespace Sassoir.Api.Data
                     item.DateLabel,
                     item.VenueName,
                     item.VenueAddress,
+                    item.EnableFloorPlan,
+                    item.EnableTableCompanions,
+                    item.EnableGuestMessages,
+                    item.EnableSongRequests,
                     item.Status,
                     item.Theme == null ? string.Empty : item.Theme.HeroText,
                     item.Theme == null ? "#D8CFBC" : item.Theme.PrimaryColor,
@@ -641,6 +657,10 @@ namespace Sassoir.Api.Data
                     item.DateLabel,
                     item.VenueName,
                     item.VenueAddress,
+                    item.EnableFloorPlan,
+                    item.EnableTableCompanions,
+                    item.EnableGuestMessages,
+                    item.EnableSongRequests,
                     item.Status,
                     item.Theme == null ? string.Empty : item.Theme.HeroText,
                     item.Theme == null ? "#D8CFBC" : item.Theme.PrimaryColor,
@@ -684,6 +704,10 @@ namespace Sassoir.Api.Data
                 VenueName = request.VenueName?.Trim() ?? string.Empty,
                 VenueAddress = request.VenueAddress?.Trim() ?? string.Empty,
                 SeatingAssignmentMode = NormalizeSeatingAssignmentMode(request.SeatingAssignmentMode),
+                EnableFloorPlan = request.EnableFloorPlan ?? true,
+                EnableTableCompanions = request.EnableTableCompanions ?? true,
+                EnableGuestMessages = request.EnableGuestMessages ?? true,
+                EnableSongRequests = request.EnableSongRequests ?? true,
                 Status = request.Status,
                 IsPublic = request.Status == EventStatus.Published,
                 PublishedAt = request.Status == EventStatus.Published ? now : null,
@@ -746,6 +770,10 @@ namespace Sassoir.Api.Data
             eventEntity.VenueName = request.VenueName?.Trim() ?? string.Empty;
             eventEntity.VenueAddress = request.VenueAddress?.Trim() ?? string.Empty;
             eventEntity.SeatingAssignmentMode = NormalizeSeatingAssignmentMode(request.SeatingAssignmentMode);
+            eventEntity.EnableFloorPlan = request.EnableFloorPlan ?? eventEntity.EnableFloorPlan;
+            eventEntity.EnableTableCompanions = request.EnableTableCompanions ?? eventEntity.EnableTableCompanions;
+            eventEntity.EnableGuestMessages = request.EnableGuestMessages ?? eventEntity.EnableGuestMessages;
+            eventEntity.EnableSongRequests = request.EnableSongRequests ?? eventEntity.EnableSongRequests;
             eventEntity.Status = request.Status;
             eventEntity.IsPublic = request.Status == EventStatus.Published;
             eventEntity.PublishedAt = request.Status == EventStatus.Published ? eventEntity.PublishedAt ?? DateTimeOffset.UtcNow : null;
@@ -1426,7 +1454,7 @@ namespace Sassoir.Api.Data
             var normalizedSlug = NormalizeSlug(slug);
             var guest = await _db.Guests
                 .AsNoTracking()
-                .Where(item => item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.PublicToken == publicToken)
+                .Where(item => item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.Event.EnableGuestMessages && item.PublicToken == publicToken)
                 .Select(item => new { item.Id, item.EventId })
                 .SingleOrDefaultAsync(cancellationToken);
             if (guest is null) return false;
@@ -1448,7 +1476,7 @@ namespace Sassoir.Api.Data
             var normalizedSlug = NormalizeSlug(slug);
             var guest = await _db.Guests
                 .AsNoTracking()
-                .Where(item => item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.PublicToken == publicToken)
+                .Where(item => item.Event != null && item.Event.Slug == normalizedSlug && item.Event.Status == EventStatus.Published && item.Event.EnableSongRequests && item.PublicToken == publicToken)
                 .Select(item => new { item.Id, item.EventId })
                 .SingleOrDefaultAsync(cancellationToken);
             if (guest is null) return null;
@@ -1472,7 +1500,7 @@ namespace Sassoir.Api.Data
             var normalizedSlug = NormalizeSlug(slug);
             var eventId = await _db.Events
                 .AsNoTracking()
-                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published)
+                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published && item.EnableSongRequests)
                 .Select(item => (Guid?)item.Id)
                 .SingleOrDefaultAsync(cancellationToken);
             if (eventId is null) return null;
@@ -1501,7 +1529,7 @@ namespace Sassoir.Api.Data
 
             var eventId = await _db.Events
                 .AsNoTracking()
-                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published && item.DjAccessToken == token)
+                .Where(item => item.Slug == normalizedSlug && item.Status == EventStatus.Published && item.EnableSongRequests && item.DjAccessToken == token)
                 .Select(item => (Guid?)item.Id)
                 .SingleOrDefaultAsync(cancellationToken);
             if (eventId is null) return null;
@@ -1695,6 +1723,10 @@ namespace Sassoir.Api.Data
                 eventEntity.DateLabel,
                 eventEntity.VenueName,
                 eventEntity.VenueAddress,
+                eventEntity.EnableFloorPlan,
+                eventEntity.EnableTableCompanions,
+                eventEntity.EnableGuestMessages,
+                eventEntity.EnableSongRequests,
                 theme);
         }
 
@@ -1766,6 +1798,10 @@ namespace Sassoir.Api.Data
                 eventEntity.DateLabel,
                 eventEntity.VenueName,
                 eventEntity.VenueAddress,
+                eventEntity.EnableFloorPlan,
+                eventEntity.EnableTableCompanions,
+                eventEntity.EnableGuestMessages,
+                eventEntity.EnableSongRequests,
                 eventEntity.Status,
                 theme,
                 ToFloorPlanDto(eventEntity),

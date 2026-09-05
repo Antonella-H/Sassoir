@@ -1608,6 +1608,15 @@ p {
   text-align: left;
 }
 
+.guest-feature-empty {
+  margin: 0;
+  color: var(--guest-olive);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .guest-accordion-section {
   border-top: 1px solid rgba(17, 18, 13, 0.14);
 }
@@ -1714,9 +1723,10 @@ p {
 }
 
 .guest-accordion-panel-inner .minimal-floor-plan {
-  width: 100%;
-  height: clamp(292px, 70vw, 360px);
-  margin-inline: 0;
+  width: min(100%, 420px);
+  aspect-ratio: 1.14;
+  height: auto;
+  margin-inline: auto;
   border: 1px solid rgba(17, 18, 13, 0.14);
   border-radius: 8px;
 }
@@ -2223,6 +2233,30 @@ p {
   background: #fff;
   color: #1f1f1f;
   padding: 0 14px;
+}
+
+.event-form .feature-toggle {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #dedbd5;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+}
+
+.event-form .feature-toggle input {
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  accent-color: #1f1f1f;
+  padding: 0;
+}
+
+.event-form .feature-toggle span {
+  line-height: 1.25;
 }
 
 .login-form input:focus,
@@ -4553,7 +4587,8 @@ button:disabled {
   }
 
   .guest-accordion-panel-inner .minimal-floor-plan {
-    height: min(318px, calc(100vw - 40px));
+    width: min(100%, 360px);
+    height: auto;
   }
 
   .guest-accordion-trigger {

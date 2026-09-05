@@ -389,6 +389,10 @@ type PublicEvent = {
   dateLabel: string;
   venueName: string;
   venueAddress: string;
+  enableFloorPlan?: boolean;
+  enableTableCompanions?: boolean;
+  enableGuestMessages?: boolean;
+  enableSongRequests?: boolean;
   theme: {
     logoText: string;
     heroText: string;
@@ -414,6 +418,10 @@ type AdminEvent = {
   dateLabel: string;
   venueName: string;
   venueAddress: string;
+  enableFloorPlan?: boolean;
+  enableTableCompanions?: boolean;
+  enableGuestMessages?: boolean;
+  enableSongRequests?: boolean;
   status: string | number;
   heroText: string;
   primaryColor: string;
@@ -450,6 +458,10 @@ type AdminEventDraft = {
   dateLabel: string;
   venueName: string;
   venueAddress: string;
+  enableFloorPlan: boolean;
+  enableTableCompanions: boolean;
+  enableGuestMessages: boolean;
+  enableSongRequests: boolean;
   status: string;
   heroText: string;
   primaryColor: string;
@@ -497,7 +509,7 @@ type ImportPreview = {
 type EventFieldDefinition = {
   label: string;
   draftField?: keyof AdminEventDraft;
-  type?: "text" | "color" | "select" | "url";
+  type?: "text" | "color" | "select" | "url" | "checkbox";
   options?: string[];
   placeholder?: string;
 };
@@ -527,6 +539,10 @@ const fallbackEvent: PublicEvent = {
   dateLabel: "Saturday, August 22",
   venueName: "The Olive Garden Venue",
   venueAddress: "Beirut, Lebanon",
+  enableFloorPlan: true,
+  enableTableCompanions: true,
+  enableGuestMessages: true,
+  enableSongRequests: true,
   theme: {
     logoText: "L & R",
     heroText: "An elegant garden celebration under soft summer lights.",
@@ -553,6 +569,10 @@ const fallbackAdminEvents: AdminEvent[] = [
     dateLabel: fallbackEvent.dateLabel,
     venueName: fallbackEvent.venueName,
     venueAddress: fallbackEvent.venueAddress,
+    enableFloorPlan: fallbackEvent.enableFloorPlan,
+    enableTableCompanions: fallbackEvent.enableTableCompanions,
+    enableGuestMessages: fallbackEvent.enableGuestMessages,
+    enableSongRequests: fallbackEvent.enableSongRequests,
     status: "Published",
     heroText: fallbackEvent.theme.heroText,
     primaryColor: fallbackEvent.theme.primaryColor,
@@ -567,6 +587,30 @@ const fallbackAdminEvents: AdminEvent[] = [
     assignedGuests: 6,
   },
 ];
+
+function withPublicFeatureDefaults(event: PublicEvent): PublicEvent {
+  return {
+    ...event,
+    enableFloorPlan: event.enableFloorPlan ?? true,
+    enableTableCompanions: event.enableTableCompanions ?? true,
+    enableGuestMessages: event.enableGuestMessages ?? true,
+    enableSongRequests: event.enableSongRequests ?? true,
+  };
+}
+
+function withAdminFeatureDefaults(event: AdminEvent): AdminEvent {
+  return {
+    ...event,
+    enableFloorPlan: event.enableFloorPlan ?? true,
+    enableTableCompanions: event.enableTableCompanions ?? true,
+    enableGuestMessages: event.enableGuestMessages ?? true,
+    enableSongRequests: event.enableSongRequests ?? true,
+  };
+}
+
+function eventFeatureEnabled(value: boolean | undefined) {
+  return value ?? true;
+}
 
 const fallbackGuests: Guest[] = [
   { publicToken: "guest-sarah-lichaa", displayName: "Sarah Lichaa", searchAliases: ["sarah", "sara lichaa", "\u0633\u0627\u0631\u0629 \u0644\u062d\u0627\u0621"], groupLabel: "Lichaa Family", tableCode: "12", tableName: "The Olive Garden", seatNumber: "4", directions: "Near the dance floor, with a clear view of the stage.", companions: ["Roula L.", "Maya K.", "Karim H."] },
@@ -627,6 +671,15 @@ const eventFormSections: EventSectionDefinition[] = [
           { label: "Event Type", draftField: "eventType", type: "select", options: eventTypeOptions },
           { label: "Seating Assignment", draftField: "seatingAssignmentMode", type: "select", options: seatingAssignmentModeOptions.map((option) => option.value) },
           { label: "Event Status", draftField: "status", type: "select", options: eventStatusOptions },
+        ],
+      },
+      {
+        name: "Guest features",
+        fields: [
+          { label: "Floor plan", draftField: "enableFloorPlan", type: "checkbox" },
+          { label: "On your table", draftField: "enableTableCompanions", type: "checkbox" },
+          { label: "Leave a message", draftField: "enableGuestMessages", type: "checkbox" },
+          { label: "Request a song", draftField: "enableSongRequests", type: "checkbox" },
         ],
       },
     ],
@@ -1334,7 +1387,7 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
       setRemoteResults(null);
 
       if (cached) {
-        setEvent(cached.event);
+        setEvent(withPublicFeatureDefaults(cached.event));
         setFloorObjects(cached.floorObjects);
         setApiOnline(true);
         setLoadState("ready");
@@ -1354,7 +1407,7 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
 
         if (!eventResponse.ok) throw new Error("API unavailable");
 
-        const publicEvent = (await eventResponse.json()) as PublicEvent;
+        const publicEvent = withPublicFeatureDefaults((await eventResponse.json()) as PublicEvent);
         const floorPlan = floorPlanResponse.ok ? await floorPlanResponse.json() : null;
         if (cancelled) return;
 
@@ -1489,9 +1542,11 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
         directions: payload.directions,
         companions: payload.companions ?? [],
       });
-      if (payload.event) setEvent(payload.event);
+      if (payload.event) setEvent(withPublicFeatureDefaults(payload.event));
       if (payload.floorPlan?.objects) {
         setFloorObjects(toFloorObjects(payload.floorPlan.objects as any[]));
+      } else {
+        setFloorObjects([]);
       }
       setApiOnline(true);
     } catch (seatError) {
@@ -1514,7 +1569,7 @@ function PublicGuestExperience({ eventSlug }: { eventSlug: string }) {
 
   async function sendMessage(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
-    if (!selectedGuest || !message.trim()) return;
+    if (!selectedGuest || !eventFeatureEnabled(event.enableGuestMessages) || !message.trim()) return;
 
     try {
       const response = await fetch(apiUrl(`/api/public/events/${eventSlug}/guests/${selectedGuest.publicToken}/messages`), {
@@ -1759,6 +1814,15 @@ function DjSongRequestsPage({ eventSlug, djAccessToken }: { eventSlug: string; d
   );
 }
 
+function defaultGuestOpenSections(event: PublicEvent): Record<GuestSeatSectionKey, boolean> {
+  const sections = { floorPlan: false, table: false, message: false, song: false };
+  if (eventFeatureEnabled(event.enableFloorPlan)) sections.floorPlan = true;
+  else if (eventFeatureEnabled(event.enableTableCompanions)) sections.table = true;
+  else if (eventFeatureEnabled(event.enableGuestMessages)) sections.message = true;
+  else if (eventFeatureEnabled(event.enableSongRequests)) sections.song = true;
+  return sections;
+}
+
 function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessageChange, onSendMessage }: {
   event: PublicEvent;
   guest: Guest;
@@ -1769,12 +1833,7 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
   onMessageChange: (value: string) => void;
   onSendMessage: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  const [openSections, setOpenSections] = useState<Record<GuestSeatSectionKey, boolean>>({
-    floorPlan: true,
-    table: false,
-    message: false,
-    song: false,
-  });
+  const [openSections, setOpenSections] = useState<Record<GuestSeatSectionKey, boolean>>(() => defaultGuestOpenSections(event));
   const [songTitle, setSongTitle] = useState("");
   const [songRequests, setSongRequests] = useState<PublicSongRequest[]>([]);
   const [songRequestsLoaded, setSongRequestsLoaded] = useState(false);
@@ -1783,16 +1842,21 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
   const [songMessage, setSongMessage] = useState("");
   const tableGuests = guest.companions.length > 0 ? guest.companions : [guest.groupLabel].filter(Boolean);
   const tableLabel = guest.tableName || guest.tableCode;
+  const floorPlanEnabled = eventFeatureEnabled(event.enableFloorPlan);
+  const tableCompanionsEnabled = eventFeatureEnabled(event.enableTableCompanions);
+  const guestMessagesEnabled = eventFeatureEnabled(event.enableGuestMessages);
+  const songRequestsEnabled = eventFeatureEnabled(event.enableSongRequests);
+  const hasEnabledGuestFeatures = floorPlanEnabled || tableCompanionsEnabled || guestMessagesEnabled || songRequestsEnabled;
 
   useEffect(() => {
-    setOpenSections({ floorPlan: true, table: false, message: false, song: false });
+    setOpenSections(defaultGuestOpenSections(event));
     setSongTitle("");
     setSongRequests([]);
     setSongRequestsLoaded(false);
     setLoadingSongRequests(false);
     setSongSubmitState("idle");
     setSongMessage("");
-  }, [event.slug, guest.publicToken]);
+  }, [event, guest.publicToken]);
 
   const toggleSection = (section: GuestSeatSectionKey) => {
     setOpenSections((current) => ({ ...current, [section]: !current[section] }));
@@ -1817,13 +1881,15 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
   }, [event.slug]);
 
   useEffect(() => {
-    if (openSections.song && !songRequestsLoaded && !loadingSongRequests) {
+    if (songRequestsEnabled && openSections.song && !songRequestsLoaded && !loadingSongRequests) {
       void loadSongRequests();
     }
-  }, [loadSongRequests, loadingSongRequests, openSections.song, songRequestsLoaded]);
+  }, [loadSongRequests, loadingSongRequests, openSections.song, songRequestsEnabled, songRequestsLoaded]);
 
   async function sendSongRequest(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
+    if (!songRequestsEnabled) return;
+
     const trimmedSongTitle = songTitle.trim();
     if (!trimmedSongTitle) {
       setSongSubmitState("error");
@@ -1870,89 +1936,99 @@ function SeatScreen({ event, guest, floorObjects, message, sent, onBack, onMessa
         </header>
 
         <div className="guest-seat-accordion">
-          <GuestAccordionSection
-            icon={<Map aria-hidden="true" />}
-            open={openSections.floorPlan}
-            sectionKey="floorPlan"
-            subtitle="Follow the highlighted route to your table"
-            title="Floor plan"
-            onToggle={() => toggleSection("floorPlan")}
-          >
-            <GuestFloorPlan floorObjects={floorObjects} tableCode={guest.tableCode} seatNumber={guest.seatNumber ?? null} showSeats={isSeatBasedEvent(event) || Boolean(guest.seatNumber)} />
-          </GuestAccordionSection>
+          {floorPlanEnabled ? (
+            <GuestAccordionSection
+              icon={<Map aria-hidden="true" />}
+              open={openSections.floorPlan}
+              sectionKey="floorPlan"
+              subtitle="Follow the highlighted route to your table"
+              title="Floor plan"
+              onToggle={() => toggleSection("floorPlan")}
+            >
+              <GuestFloorPlan floorObjects={floorObjects} tableCode={guest.tableCode} seatNumber={guest.seatNumber ?? null} showSeats={isSeatBasedEvent(event) || Boolean(guest.seatNumber)} />
+            </GuestAccordionSection>
+          ) : null}
 
-          <GuestAccordionSection
-            icon={<Users aria-hidden="true" />}
-            open={openSections.table}
-            sectionKey="table"
-            subtitle="See who is seated with you"
-            title="On your table"
-            onToggle={() => toggleSection("table")}
-          >
-            <section className="guest-table-names" aria-label={`Guests at table ${guest.tableCode}`}>
-              <p>You can find on your table</p>
-              <div>
-                {tableGuests.map((companion) => <span key={companion}>{companion}</span>)}
-              </div>
-            </section>
-          </GuestAccordionSection>
+          {tableCompanionsEnabled ? (
+            <GuestAccordionSection
+              icon={<Users aria-hidden="true" />}
+              open={openSections.table}
+              sectionKey="table"
+              subtitle="See who is joining you"
+              title="On your table"
+              onToggle={() => toggleSection("table")}
+            >
+              <section className="guest-table-names" aria-label={`Guests at table ${guest.tableCode}`}>
+                <p>You can find on your table</p>
+                <div>
+                  {tableGuests.map((companion) => <span key={companion}>{companion}</span>)}
+                </div>
+              </section>
+            </GuestAccordionSection>
+          ) : null}
 
-          <GuestAccordionSection
-            icon={<Send aria-hidden="true" />}
-            open={openSections.message}
-            sectionKey="message"
-            subtitle="Share a note with the newlyweds"
-            title="Leave a message"
-            onToggle={() => toggleSection("message")}
-          >
-            <form className="guest-message-form" onSubmit={onSendMessage}>
-              <label htmlFor="guest-message">Leave a message to the newlyweds</label>
-              <textarea id="guest-message" value={message} onChange={(event) => onMessageChange(event.target.value)} rows={5} placeholder="Write your message..." />
-              <button type="submit">Leave a Message</button>
-              {sent ? <p role="status">Message saved. Thank you.</p> : null}
-            </form>
-          </GuestAccordionSection>
+          {guestMessagesEnabled ? (
+            <GuestAccordionSection
+              icon={<Send aria-hidden="true" />}
+              open={openSections.message}
+              sectionKey="message"
+              subtitle="Share a note with the newlyweds"
+              title="Leave a message"
+              onToggle={() => toggleSection("message")}
+            >
+              <form className="guest-message-form" onSubmit={onSendMessage}>
+                <label htmlFor="guest-message">Leave a message to the newlyweds</label>
+                <textarea id="guest-message" value={message} onChange={(event) => onMessageChange(event.target.value)} rows={5} placeholder="Write your message..." />
+                <button type="submit">Leave a Message</button>
+                {sent ? <p role="status">Message saved. Thank you.</p> : null}
+              </form>
+            </GuestAccordionSection>
+          ) : null}
 
-          <GuestAccordionSection
-            icon={<Music aria-hidden="true" />}
-            open={openSections.song}
-            sectionKey="song"
-            subtitle="Send a song idea to the DJ"
-            title="Request a song"
-            onToggle={() => toggleSection("song")}
-          >
-            <form className="guest-message-form guest-song-form" onSubmit={sendSongRequest}>
-              <label htmlFor="guest-song-title">Song title</label>
-              <input
-                id="guest-song-title"
-                maxLength={200}
-                onChange={(formEvent) => {
-                  setSongTitle(formEvent.target.value);
-                  if (songSubmitState === "error") {
-                    setSongSubmitState("idle");
-                    setSongMessage("");
-                  }
-                }}
-                placeholder="Type a song for the dance floor"
-                type="text"
-                value={songTitle}
-              />
-              <button type="submit" disabled={songSubmitState === "sending"}>{songSubmitState === "sending" ? "Sending..." : "Send to DJ"}</button>
-              {songMessage ? <p className={songSubmitState === "error" ? "guest-form-error" : ""} role={songSubmitState === "error" ? "alert" : "status"}>{songMessage}</p> : null}
-            </form>
+          {songRequestsEnabled ? (
+            <GuestAccordionSection
+              icon={<Music aria-hidden="true" />}
+              open={openSections.song}
+              sectionKey="song"
+              subtitle="Send a song idea to the DJ"
+              title="Request a song"
+              onToggle={() => toggleSection("song")}
+            >
+              <form className="guest-message-form guest-song-form" onSubmit={sendSongRequest}>
+                <label htmlFor="guest-song-title">Song title</label>
+                <input
+                  id="guest-song-title"
+                  maxLength={200}
+                  onChange={(formEvent) => {
+                    setSongTitle(formEvent.target.value);
+                    if (songSubmitState === "error") {
+                      setSongSubmitState("idle");
+                      setSongMessage("");
+                    }
+                  }}
+                  placeholder="Type a song for the dance floor"
+                  type="text"
+                  value={songTitle}
+                />
+                <button type="submit" disabled={songSubmitState === "sending"}>{songSubmitState === "sending" ? "Sending..." : "Send to DJ"}</button>
+                {songMessage ? <p className={songSubmitState === "error" ? "guest-form-error" : ""} role={songSubmitState === "error" ? "alert" : "status"}>{songMessage}</p> : null}
+              </form>
 
-            <section className="guest-song-requests" aria-label="Recently requested songs">
-              <p>Recently requested</p>
-              {loadingSongRequests ? <span role="status">Loading requests...</span> : null}
-              {!loadingSongRequests && songRequests.length === 0 ? <span>No song requests yet.</span> : null}
-              {songRequests.map((request) => (
-                <article key={request.id}>
-                  <strong>{request.songTitle}</strong>
-                  <time dateTime={request.createdAt}>{new Date(request.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>
-                </article>
-              ))}
-            </section>
-          </GuestAccordionSection>
+              <section className="guest-song-requests" aria-label="Recently requested songs">
+                <p>Recently requested</p>
+                {loadingSongRequests ? <span role="status">Loading requests...</span> : null}
+                {!loadingSongRequests && songRequests.length === 0 ? <span>No song requests yet.</span> : null}
+                {songRequests.map((request) => (
+                  <article key={request.id}>
+                    <strong>{request.songTitle}</strong>
+                    <time dateTime={request.createdAt}>{new Date(request.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time>
+                  </article>
+                ))}
+              </section>
+            </GuestAccordionSection>
+          ) : null}
+
+          {!hasEnabledGuestFeatures ? <p className="guest-feature-empty">No extra guest features are enabled for this event.</p> : null}
         </div>
 
         <a className="guest-seat-logo-link" href="/" aria-label="Go to S'assoir home">
@@ -2402,7 +2478,7 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       if (!response.ok) throw new Error("Could not load events.");
 
       const payload = (await response.json()) as AdminEvent[];
-      setEvents(payload);
+      setEvents(payload.map(withAdminFeatureDefaults));
       setApiOnline(true);
     } catch (loadError) {
       setApiOnline(false);
@@ -2503,6 +2579,10 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       dateLabel: event.dateLabel,
       venueName: event.venueName,
       venueAddress: event.venueAddress,
+      enableFloorPlan: event.enableFloorPlan ?? true,
+      enableTableCompanions: event.enableTableCompanions ?? true,
+      enableGuestMessages: event.enableGuestMessages ?? true,
+      enableSongRequests: event.enableSongRequests ?? true,
       status: eventStatusText(event.status),
       heroText: event.heroText,
       primaryColor: event.primaryColor,
@@ -2556,6 +2636,10 @@ function AdminDashboard({ page }: { page: AdminPage }) {
         dateLabel: draft.dateLabel,
         venueName: draft.venueName,
         venueAddress: draft.venueAddress,
+        enableFloorPlan: draft.enableFloorPlan,
+        enableTableCompanions: draft.enableTableCompanions,
+        enableGuestMessages: draft.enableGuestMessages,
+        enableSongRequests: draft.enableSongRequests,
         status: draft.status,
         heroText: draft.heroText,
         primaryColor: draft.primaryColor,
@@ -2698,6 +2782,10 @@ function AdminDashboard({ page }: { page: AdminPage }) {
       dateLabel: routedEvent.dateLabel,
       venueName: routedEvent.venueName,
       venueAddress: routedEvent.venueAddress,
+      enableFloorPlan: routedEvent.enableFloorPlan ?? true,
+      enableTableCompanions: routedEvent.enableTableCompanions ?? true,
+      enableGuestMessages: routedEvent.enableGuestMessages ?? true,
+      enableSongRequests: routedEvent.enableSongRequests ?? true,
       status: eventStatusText(routedEvent.status),
       heroText: routedEvent.heroText,
       primaryColor: routedEvent.primaryColor,
@@ -5041,6 +5129,8 @@ function PublishPage({ events, saving, onSetPublication }: {
 function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent; token: string; activeSubsection: string }) {
   const published = eventStatusText(event.status).toLowerCase() === "published";
   const publicUrl = getEventPublicUrl(event);
+  const guestMessagesEnabled = eventFeatureEnabled(event.enableGuestMessages);
+  const songRequestsEnabled = eventFeatureEnabled(event.enableSongRequests);
   const [messages, setMessages] = useState<AdminGuestMessage[]>([]);
   const [songRequests, setSongRequests] = useState<AdminSongRequest[]>([]);
   const [messagePage, setMessagePage] = useState(1);
@@ -5064,7 +5154,7 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
     setSongRequests([]);
     setTotalMessageCount(0);
     setTotalSongRequestCount(0);
-  }, [activeSubsection, event.id, published]);
+  }, [activeSubsection, event.id, guestMessagesEnabled, published, songRequestsEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5096,11 +5186,11 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
       }
     }
 
-    if (published && activeSubsection === "Guest messages") void loadMessages();
+    if (published && guestMessagesEnabled && activeSubsection === "Guest messages") void loadMessages();
     return () => {
       cancelled = true;
     };
-  }, [activeSubsection, event.id, messagePage, published, token]);
+  }, [activeSubsection, event.id, guestMessagesEnabled, messagePage, published, token]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5132,11 +5222,11 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
       }
     }
 
-    if (published && activeSubsection === "Song requests") void loadSongRequests();
+    if (published && songRequestsEnabled && activeSubsection === "Song requests") void loadSongRequests();
     return () => {
       cancelled = true;
     };
-  }, [activeSubsection, event.id, published, songRequestPage, token]);
+  }, [activeSubsection, event.id, published, songRequestPage, songRequestsEnabled, token]);
 
   async function exportMessages() {
     setExportingMessages(true);
@@ -5226,9 +5316,9 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
               <p className="eyebrow">Guest messages</p>
               <h2>Messages guests left</h2>
             </div>
-            <button className="secondary-button compact-button" type="button" onClick={exportMessages} disabled={exportingMessages || totalMessageCount === 0}><Download aria-hidden="true" />{exportingMessages ? "Exporting..." : "Export"}</button>
+            <button className="secondary-button compact-button" type="button" onClick={exportMessages} disabled={!guestMessagesEnabled || exportingMessages || totalMessageCount === 0}><Download aria-hidden="true" />{exportingMessages ? "Exporting..." : "Export"}</button>
           </div>
-          {published ? (
+          {published ? guestMessagesEnabled ? (
             <>
               {loadingMessages ? <p className="admin-muted">Loading messages...</p> : null}
               <div className="message-list">
@@ -5253,6 +5343,8 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
               {!loadingMessages && messages.length === 0 ? <p className="empty-state">No guest messages yet.</p> : null}
             </>
           ) : (
+            <p className="empty-state">Guest messages are disabled for this event.</p>
+          ) : (
             <p className="empty-state">Publish this event before collecting guest messages.</p>
           )}
         </section>
@@ -5267,7 +5359,7 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
             </div>
             {loadingSongRequests ? <span className="api-status">Loading...</span> : null}
           </div>
-          {published ? (
+          {published ? songRequestsEnabled ? (
             <>
               <div className="setup-copy dj-share-link">
                 <strong>DJ public link</strong>
@@ -5298,6 +5390,8 @@ function EventSetupPage({ event, token, activeSubsection }: { event: AdminEvent;
               ) : null}
               {!loadingSongRequests && songRequests.length === 0 ? <p className="empty-state">No song requests yet.</p> : null}
             </>
+          ) : (
+            <p className="empty-state">Song requests are disabled for this event.</p>
           ) : (
             <p className="empty-state">Publish this event before collecting song requests.</p>
           )}
@@ -5608,20 +5702,21 @@ function EventEditorForm({ draft, editorEvent, token, onDraftChange, onSubmit, o
   const [uploadingImage, setUploadingImage] = useState(false);
   const [uploadError, setUploadError] = useState("");
 
-  const update = (field: keyof AdminEventDraft, value: string) => {
+  const update = (field: keyof AdminEventDraft, value: string | boolean) => {
     if (field === "name") {
+      const eventName = String(value);
       onDraftChange({
         ...draft,
-        name: value,
-        slug: slugify(value),
-        welcomeTitle: draft.welcomeTitle || `Welcome to ${value}`,
+        name: eventName,
+        slug: slugify(eventName),
+        welcomeTitle: draft.welcomeTitle || `Welcome to ${eventName}`,
       });
       return;
     }
 
     onDraftChange({
       ...draft,
-      [field]: field === "slug" ? slugify(value) : value,
+      [field]: field === "slug" ? slugify(String(value)) : value,
     });
   };
 
@@ -5691,9 +5786,23 @@ function EventEditorForm({ draft, editorEvent, token, onDraftChange, onSubmit, o
                   return (
                     <label key={id} htmlFor={id}>
                       {field.label}
-                      <select id={id} value={value} onChange={(event) => field.draftField ? update(field.draftField, event.target.value) : undefined}>
+                      <select id={id} value={String(value)} onChange={(event) => field.draftField ? update(field.draftField, event.target.value) : undefined}>
                         {(field.options ?? ["Draft", "Published", "Archived"]).map((option) => <option key={option} value={option}>{eventSelectOptionLabel(field.draftField, option)}</option>)}
                       </select>
+                    </label>
+                  );
+                }
+
+                if (field.type === "checkbox") {
+                  return (
+                    <label className="feature-toggle" key={id} htmlFor={id}>
+                      <input
+                        id={id}
+                        type="checkbox"
+                        checked={Boolean(value)}
+                        onChange={(event) => field.draftField ? update(field.draftField, event.target.checked) : undefined}
+                      />
+                      <span>{field.label}</span>
                     </label>
                   );
                 }
@@ -5704,7 +5813,7 @@ function EventEditorForm({ draft, editorEvent, token, onDraftChange, onSubmit, o
                     <input
                       id={id}
                       type={field.type === "color" ? "color" : field.type === "url" ? "url" : "text"}
-                      value={value}
+                      value={String(value)}
                       onChange={(event) => field.draftField ? update(field.draftField, event.target.value) : undefined}
                       placeholder={field.placeholder ?? ""}
                       readOnly={!field.draftField}
@@ -5775,6 +5884,10 @@ function emptyEventDraft(): AdminEventDraft {
     dateLabel: "",
     venueName: "",
     venueAddress: "",
+    enableFloorPlan: true,
+    enableTableCompanions: true,
+    enableGuestMessages: true,
+    enableSongRequests: true,
     status: "Draft",
     heroText: "",
     primaryColor: "#D8CFBC",
