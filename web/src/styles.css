@@ -1689,6 +1689,8 @@ p {
 }
 
 .guest-accordion-panel-inner {
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -1709,6 +1711,14 @@ p {
   border-bottom: 1px solid rgba(17, 18, 13, 0.14);
   background: #fbf8f1;
   overflow: hidden;
+}
+
+.guest-accordion-panel-inner .minimal-floor-plan {
+  width: 100%;
+  height: clamp(292px, 70vw, 360px);
+  margin-inline: 0;
+  border: 1px solid rgba(17, 18, 13, 0.14);
+  border-radius: 8px;
 }
 
 .plan-zone {
@@ -4529,8 +4539,8 @@ button:disabled {
 
   .guest-welcome-content,
   .guest-seat-content {
-    padding-right: 28px;
-    padding-left: 28px;
+    padding-right: 20px;
+    padding-left: 20px;
   }
 
   .guest-welcome-content h1,
@@ -4540,6 +4550,23 @@ button:disabled {
 
   .minimal-floor-plan {
     height: 318px;
+  }
+
+  .guest-accordion-panel-inner .minimal-floor-plan {
+    height: min(318px, calc(100vw - 40px));
+  }
+
+  .guest-accordion-trigger {
+    grid-template-columns: 32px minmax(0, 1fr) 20px;
+    gap: 10px;
+  }
+
+  .guest-accordion-copy strong {
+    font-size: 17px;
+  }
+
+  .guest-accordion-copy small {
+    font-size: 11px;
   }
 
   .plan-table-seven {
